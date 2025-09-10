@@ -1,0 +1,9 @@
+Flask
+Flask-SQLAlchemy
+Flask-Migrate
+Flask-Bcrypt
+Flask-JWT-Extended
+python-dotenv
+Flask-Cors
+psycopg2-binary
+Flask-Mail

@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+ENV/
+env/
+.venv/
+
+# Environment variables
+# .env
+
+# SQLite database (don’t push local DB)
+instance/
+*.db
+
+# VS Code settings
+.vscode/
+
+# Migrations cache (keep actual migrations folder, ignore caches)
+migrations/__pycache__/
+
+# System files
+.DS_Store
+Thumbs.db
