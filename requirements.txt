@@ -7,3 +7,4 @@ python-dotenv
 Flask-Cors
 psycopg2-binary
 Flask-Mail
+gunicorn
