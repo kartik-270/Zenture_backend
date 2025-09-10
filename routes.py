@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 # Corrected: Import ALL necessary models from the models file
 from models import (
     db, User, UserRole, VerificationCode, ConfidentialData, 
-    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt
+    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt,ChatHistory
 )
 from extensions import mail
 
@@ -176,6 +176,55 @@ def login():
         return jsonify(access_token=access_token)
 
     return jsonify(msg="Bad username or password"), 401
+@api_bp.route('/botpress/webhook/save-chat', methods=['POST'])
+@jwt_required()
+def save_botpress_chat():
+    """
+    Webhook to receive and save chat history from Botpress for the logged-in user.
+    The user is identified by the JWT sent in the Authorization header.
+    """
+    try:
+        # 1. Get the user's ID from their login token. This is secure.
+        user_id_from_token = get_jwt_identity()
+        
+        # Check if the user exists in the database
+        user = User.query.get(user_id_from_token)
+        if not user:
+            return jsonify(msg="User not found."), 404
+
+        # 2. Get the chat data payload sent from Botpress
+        data = request.get_json()
+        if not data:
+            return jsonify(msg="Missing JSON payload in request"), 400
+
+        # 3. Extract relevant information from the Botpress payload
+        #    (You may need to adjust these keys based on what your bot sends)
+        conversation_id = data.get('conversationId')
+        user_message = data.get('userMessage')
+        bot_response = data.get('botResponse')
+
+        if not conversation_id:
+            return jsonify(msg="Payload must include a 'conversationId'"), 400
+
+        # 4. Create the new chat history record, linking it to the logged-in user
+        new_chat_entry = ChatHistory(
+            user_id=user.id,  # Assign the chat record to the authenticated user
+            conversation_id=conversation_id,
+            user_message=user_message,
+            bot_response=bot_response,
+            botpress_payload=data  # Store the full original payload for auditing
+        )
+
+        # 5. Save the record to the database
+        db.session.add(new_chat_entry)
+        db.session.commit()
+
+        return jsonify(msg=f"Chat log saved for user {user.username}"), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"ERROR in /botpress/webhook/save-chat: {e}") # For debugging
+        return jsonify(msg="An internal server error occurred."), 500
 
 # ... (rest of the file remains the same)
 # --- Resource Hub Endpoints ---

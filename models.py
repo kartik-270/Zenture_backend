@@ -28,7 +28,25 @@ class User(db.Model):
 
     def check_password(self, password):
         return bcrypt.check_password_hash(self.password_hash, password)
+class ChatHistory(db.Model):
+    """
+    Stores a record of a single turn in a conversation between a user and the chatbot.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    conversation_id = db.Column(db.String(100), nullable=False, index=True)
+    
+    # Store the raw, complete JSON payload from Botpress for future analysis
+    botpress_payload = db.Column(db.JSON, nullable=True) 
+    
+    # For quick access, you can also store specific parts of the conversation
+    user_message = db.Column(db.Text, nullable=True)
+    bot_response = db.Column(db.Text, nullable=True)
+    
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
+    # Establish the relationship to the User model
+    user = db.relationship('User', backref=db.backref('chat_history', lazy=True))
 class ConfidentialData(db.Model):
     """
     Stores confidential user details in a separate table,
