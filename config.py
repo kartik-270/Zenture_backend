@@ -14,7 +14,10 @@ class Config:
     
     # Database configuration
     # This uses SQLite for simplicity. For production, you would use PostgreSQL or MySQL.
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') 
+    uri = os.environ.get("DATABASE_URL")
+    if uri and uri.startswith("postgres://"):
+        uri = uri.replace("postgres://", "postgresql://", 1)
+    SQLALCHEMY_DATABASE_URI = uri 
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     MAIL_SERVER = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
     MAIL_PORT = int(os.environ.get('MAIL_PORT', 587))
