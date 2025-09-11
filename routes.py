@@ -1,8 +1,7 @@
 from flask import Blueprint, request, jsonify
-# Corrected: Import ALL necessary models from the models file
 from models import (
     db, User, UserRole, VerificationCode, ConfidentialData, 
-    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt,ChatHistory
+    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory
 )
 from extensions import mail
 
@@ -19,9 +18,6 @@ api_bp = Blueprint('api', __name__)
 
 # --- Helper Functions ---
 def send_verification_email(email, code):
-    """
-    Sends a verification email to the user with the provided OTP code.
-    """
     try:
         subject = "Your Verification Code for Mental Health Platform"
         msg = Message(subject, recipients=[email])
@@ -41,13 +37,22 @@ If you did not request this, please ignore this email.
         return False
 
 def generate_unique_username():
-    """Generates a username that doesn't already exist."""
     while True:
         adjectives = ['Quiet', 'Bright', 'Silent', 'Happy', 'Blue', 'Green', 'Red']
         nouns = ['River', 'Sun', 'Moon', 'Star', 'Tree', 'Sky', 'Sea']
         username = random.choice(adjectives) + random.choice(nouns) + str(random.randint(100, 999))
         if not User.query.filter_by(username=username).first():
             return username
+            
+def generate_random_slot(date_str):
+    try:
+        date = dt.strptime(date_str, "%Y-%m-%d")
+        slots = ["09:00", "10:30", "12:00", "14:00", "15:30", "17:00"]
+        time_str = random.choice(slots)
+        hour, minute = map(int, time_str.split(":"))
+        return dt(date.year, date.month, date.day, hour, minute)
+    except ValueError:
+        return None
 
 # --- Authorization Decorators ---
 def roles_required(*roles):
@@ -57,10 +62,7 @@ def roles_required(*roles):
         def decorator(*args, **kwargs):
             claims = get_jwt()
             user_role_str = claims.get('role')
-            # Convert string role from token back to Enum member
             user_role = UserRole(user_role_str)
-            
-            # Convert required roles from string to Enum members
             required_roles = [UserRole(r) for r in roles]
             
             if user_role not in required_roles:
@@ -159,8 +161,6 @@ def complete_profile():
 
     return jsonify(msg="Your profile has been securely saved."), 201
 
-# ... (rest of the file remains the same)
-
 @api_bp.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
@@ -168,65 +168,14 @@ def login():
 
     if user and user.check_password(data.get('password')):
         additional_claims = {"role": user.role.value}
-        # Cast user.id to a string to satisfy PyJWT's subject validation
         access_token = create_access_token(
             identity=str(user.id), 
             additional_claims=additional_claims
         )
-        return jsonify(access_token=access_token)
+        return jsonify(access_token=access_token,username=user.username)
 
     return jsonify(msg="Bad username or password"), 401
-@api_bp.route('/botpress/webhook/save-chat', methods=['POST'])
-@jwt_required()
-def save_botpress_chat():
-    """
-    Webhook to receive and save chat history from Botpress for the logged-in user.
-    The user is identified by the JWT sent in the Authorization header.
-    """
-    try:
-        # 1. Get the user's ID from their login token. This is secure.
-        user_id_from_token = get_jwt_identity()
-        
-        # Check if the user exists in the database
-        user = User.query.get(user_id_from_token)
-        if not user:
-            return jsonify(msg="User not found."), 404
-
-        # 2. Get the chat data payload sent from Botpress
-        data = request.get_json()
-        if not data:
-            return jsonify(msg="Missing JSON payload in request"), 400
-
-        # 3. Extract relevant information from the Botpress payload
-        #    (You may need to adjust these keys based on what your bot sends)
-        conversation_id = data.get('conversationId')
-        user_message = data.get('userMessage')
-        bot_response = data.get('botResponse')
-
-        if not conversation_id:
-            return jsonify(msg="Payload must include a 'conversationId'"), 400
-
-        # 4. Create the new chat history record, linking it to the logged-in user
-        new_chat_entry = ChatHistory(
-            user_id=user.id,  # Assign the chat record to the authenticated user
-            conversation_id=conversation_id,
-            user_message=user_message,
-            bot_response=bot_response,
-            botpress_payload=data  # Store the full original payload for auditing
-        )
-
-        # 5. Save the record to the database
-        db.session.add(new_chat_entry)
-        db.session.commit()
-
-        return jsonify(msg=f"Chat log saved for user {user.username}"), 200
-
-    except Exception as e:
-        db.session.rollback()
-        print(f"ERROR in /botpress/webhook/save-chat: {e}") # For debugging
-        return jsonify(msg="An internal server error occurred."), 500
-
-# ... (rest of the file remains the same)
+    
 # --- Resource Hub Endpoints ---
 
 @api_bp.route('/resources', methods=['GET'])
@@ -259,39 +208,75 @@ def add_resource():
 
 # --- Counselor and Appointment Endpoints ---
 
-@api_bp.route('/counselors', methods=['GET'])
+@api_bp.route("/counselors", methods=["GET"])
 @jwt_required()
 def get_counselors():
-    counselors = User.query.filter_by(role=UserRole.COUNSELOR).all()
-    counselor_list = []
+    counselors = (
+        db.session.query(CounselorProfile)
+        .join(User)
+        .filter(User.role == UserRole.COUNSELOR)
+        .all()
+    )
+
+    result = []
     for c in counselors:
-        profile = CounselorProfile.query.filter_by(user_id=c.id).first()
-        counselor_list.append({
-            "id": c.id,
-            "username": c.username, # Anonymous username
-            "specialization": profile.specialization if profile else "N/A",
-            "availability": profile.availability if profile else "N/A"
+        dummy_reviews = 5 
+        dummy_image = f"https://i.pravatar.cc/150?u={c.user.id}"
+        result.append({
+            "id": c.id, 
+            "user_id": c.user.id, 
+            "name": c.user.username,
+            "specialty": c.specialization,
+            "reviews": dummy_reviews, 
+            "image": dummy_image
         })
-    return jsonify(counselor_list)
+    return jsonify(result)
 
 @api_bp.route('/appointments', methods=['POST'])
-@roles_required('student')
+@jwt_required()
 def book_appointment():
-    data = request.get_json()
+    data = request.json
     student_id = get_jwt_identity()
     
-    appointment_time_str = data.get('appointment_time')
-    appointment_time = dt.fromisoformat(appointment_time_str)
+    counselor_id = data.get('counselor_id')
+    appointment_date = data.get('appointment_date')
+    mode = data.get('mode')
+    description = data.get('description')
+
+    if not all([counselor_id, appointment_date, mode]):
+        return jsonify({"error": "Counselor ID, date, and mode are required"}), 400
+    
+    counselor = User.query.get(counselor_id)
+    if not counselor or counselor.role != UserRole.COUNSELOR:
+        return jsonify({"error": "Counselor not found or invalid"}), 404
+
+    appointment_time = generate_random_slot(appointment_date)
+    if not appointment_time:
+        return jsonify({"error": "Invalid date format or value."}), 400
 
     new_appointment = Appointment(
         student_id=student_id,
-        counselor_id=data['counselor_id'],
+        counselor_id=counselor.id,
         appointment_time=appointment_time,
-        notes=data.get('notes')
+        status="booked",
+        notes=description
     )
     db.session.add(new_appointment)
     db.session.commit()
-    return jsonify(msg="Appointment booked successfully."), 201
+    
+    # --- CORRECTED RETURN STATEMENT ---
+    return jsonify({
+        "message": "Appointment confirmed!",
+        "appointment": {
+            "counselor": counselor.username,
+            "date": appointment_time.strftime("%Y-%m-%d"),
+            "time": appointment_time.strftime("%H:%M"),
+            "mode": mode,
+            "description": description,
+            "status": new_appointment.status
+        }
+    }), 201
+    # -----------------------------------
 
 @api_bp.route('/appointments', methods=['GET'])
 @jwt_required()
@@ -305,7 +290,7 @@ def get_appointments():
     elif user_role == 'counselor':
         appointments = Appointment.query.filter_by(counselor_id=user_id).all()
     else:
-        return jsonify([]) # Admins/others don't see personal appointments this way
+        return jsonify([])
 
     return jsonify([{
         "id": a.id,
@@ -378,4 +363,3 @@ def reply_to_post(post_id):
     db.session.add(reply)
     db.session.commit()
     return jsonify(msg="Reply posted successfully"), 201
-
