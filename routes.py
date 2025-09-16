@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from models import (
     db, User, UserRole, VerificationCode, ConfidentialData, 
-    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin, JournalEntry
+    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin, JournalEntry,Notification, UserActivityLog
 )
 from extensions import mail
 
@@ -206,7 +206,23 @@ def add_resource():
     return jsonify(msg="Resource added successfully"), 201
 
 # --- Counselor and Appointment Endpoints ---
-
+@api_bp.route('/admin/dashboard', methods=['GET'])
+@roles_required('admin')
+def admin_dashboard_data():
+    """
+    An endpoint exclusively for admins. 
+    Provides basic statistics for the admin dashboard.
+    """
+    user_count = User.query.count()
+    appointment_count = Appointment.query.count()
+    
+    return jsonify({
+        "message": "Welcome, Admin!",
+        "stats": {
+            "totalUsers": user_count,
+            "totalAppointments": appointment_count
+        }
+    }), 200
 @api_bp.route("/counselors", methods=["GET"])
 @jwt_required()
 def get_counselors():
@@ -269,8 +285,16 @@ def book_appointment():
         meeting_link=meeting_link
     )
     db.session.add(new_appointment)
-    db.session.commit()
+    student_msg = f"Your appointment with {counselor.username} is confirmed for {appointment_time.strftime('%b %d, %Y at %I:%M %p')}."
+    counselor_msg = f"You have a new appointment with a student for {appointment_time.strftime('%b %d, %Y at %I:%M %p')}."
+
+    student_notification = Notification(user_id=student_id, message=student_msg, link=meeting_link)
+    counselor_notification = Notification(user_id=counselor.id, message=counselor_msg, link=meeting_link)
     
+    db.session.add(student_notification)
+    db.session.add(counselor_notification)
+    db.session.commit()
+ 
     return jsonify({
         "message": "Appointment confirmed!",
         "appointment": {
@@ -283,7 +307,18 @@ def book_appointment():
             "meeting_link": new_appointment.meeting_link
         }
     }), 201
-
+@api_bp.route('/notifications', methods=['GET'])
+@jwt_required()
+def get_notifications():
+    user_id = get_jwt_identity()
+    notifications = Notification.query.filter_by(user_id=user_id, is_read=False).order_by(Notification.timestamp.desc()).all()
+    
+    return jsonify([{
+        "id": n.id,
+        "message": n.message,
+        "link": n.link,
+        "timestamp": n.timestamp.isoformat()
+    } for n in notifications])
 @api_bp.route('/appointments', methods=['GET'])
 @jwt_required()
 def get_appointments():
