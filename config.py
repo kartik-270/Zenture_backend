@@ -5,15 +5,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    """
-    Configuration class for the Flask application.
-    Loads settings from environment variables.
-    """
+    
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'default-secret-key'
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or 'default-jwt-secret-key'
     
-    # Database configuration
-    # This uses SQLite for simplicity. For production, you would use PostgreSQL or MySQL.
+    
     uri = os.environ.get("DATABASE_URL")
     if uri and uri.startswith("postgres://"):
         uri = uri.replace("postgres://", "postgresql://", 1)

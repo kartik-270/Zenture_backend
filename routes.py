@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from models import (
     db, User, UserRole, VerificationCode, ConfidentialData, 
-    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory
+    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory,MoodCheckin
 )
 from extensions import mail
 
@@ -13,10 +13,8 @@ import re
 import random
 from flask_mail import Message
 
-# Create a Blueprint for the API
 api_bp = Blueprint('api', __name__)
 
-# --- Helper Functions ---
 def send_verification_email(email, code):
     try:
         subject = "Your Verification Code for Mental Health Platform"
@@ -363,3 +361,46 @@ def reply_to_post(post_id):
     db.session.add(reply)
     db.session.commit()
     return jsonify(msg="Reply posted successfully"), 201
+
+@api_bp.route('/mood-checkin', methods=['POST'])
+@jwt_required()
+def add_mood_checkin():
+    data = request.get_json()
+    user_id = get_jwt_identity()
+    mood = data.get('mood')
+    
+    if not mood:
+        return jsonify(msg="Mood is required"), 400
+
+    # Optional: You can also parse the date from the frontend if needed
+    # timestamp = dt.fromisoformat(data.get('date'))
+    new_checkin = MoodCheckin(user_id=user_id, mood=mood)
+    db.session.add(new_checkin)
+    db.session.commit()
+    
+    return jsonify(msg="Mood saved successfully"), 201
+
+@api_bp.route('/mood-history', methods=['GET'])
+@jwt_required()
+def get_mood_history():
+    user_id = get_jwt_identity()
+    days_str = request.args.get('days', '7')
+    
+    try:
+        days = int(days_str)
+    except ValueError:
+        return jsonify(msg="Invalid 'days' parameter"), 400
+
+    start_date = dt.utcnow() - timedelta(days=days)
+    
+    checkins = MoodCheckin.query.filter(
+        MoodCheckin.user_id == user_id,
+        MoodCheckin.timestamp >= start_date
+    ).order_by(MoodCheckin.timestamp.asc()).all()
+    
+    history = [{
+        "mood": c.mood,
+        "date": c.timestamp.isoformat()
+    } for c in checkins]
+    
+    return jsonify(history)
