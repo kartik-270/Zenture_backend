@@ -16,6 +16,26 @@ from flask_mail import Message
 
 api_bp = Blueprint('api', __name__)
 
+@api_bp.route('/admin/register', methods=['POST'])
+def register_admin():
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify(msg="Username and password are required"), 400
+
+    if User.query.filter_by(username=username).first():
+        return jsonify(msg="Username already exists"), 409
+
+    new_admin = User(username=username, role=UserRole.ADMIN)
+    new_admin.set_password(password)
+
+    db.session.add(new_admin)
+    db.session.commit()
+
+    return jsonify(msg="Admin registered successfully"), 201
+
 def send_verification_email(email, code):
     try:
         subject = "Your Verification Code for Mental Health Platform"
@@ -269,11 +289,10 @@ def book_appointment():
     if not appointment_time:
         return jsonify({"error": "Invalid date format or value."}), 400
 
-    # --- FIX: Generate a meeting link only for 'video_call' mode ---
+    # Rectified: Generate a meeting link only for 'video_call' mode
     meeting_link = None
     if mode == 'video_call':
         meeting_link = f"/session/{uuid.uuid4()}"
-    # -----------------------------------------------------------------
 
     new_appointment = Appointment(
         student_id=student_id,
@@ -294,7 +313,7 @@ def book_appointment():
     db.session.add(student_notification)
     db.session.add(counselor_notification)
     db.session.commit()
- 
+    
     return jsonify({
         "message": "Appointment confirmed!",
         "appointment": {
