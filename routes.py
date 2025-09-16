@@ -44,11 +44,11 @@ def generate_unique_username():
             
 def generate_random_slot(date_str):
     try:
-        date = dt.strptime(date_str, "%Y-%m-%d")
+        date_obj = dt.strptime(date_str, "%Y-%m-%d")
         slots = ["09:00", "10:30", "12:00", "14:00", "15:30", "17:00"]
         time_str = random.choice(slots)
         hour, minute = map(int, time_str.split(":"))
-        return dt(date.year, date.month, date.day, hour, minute)
+        return dt(date_obj.year, date_obj.month, date_obj.day, hour, minute)
     except ValueError:
         return None
 
@@ -362,12 +362,11 @@ def reply_to_post(post_id):
 
 # --- Dashboard Endpoints ---
 
-@api_bp.route('/mood-checkin/today', methods=['GET'])
+@api_bp.route('/mood-checkin/today-status', methods=['GET']) # <-- RENAMED ENDPOINT
 @jwt_required()
 def get_today_mood_checkin():
     """Checks if the current user has already submitted a mood today."""
     user_id = get_jwt_identity()
-    # FIX: Use datetime.date and datetime.time
     today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
     today_end = datetime.datetime.combine(datetime.date.today(), datetime.time.max)
 
@@ -388,8 +387,6 @@ def add_mood_checkin():
     """Adds a mood check-in for the current user, if one for today doesn't exist."""
     user_id = get_jwt_identity()
     
-    # --- Check for existing entry on the same day ---
-    # FIX: Use datetime.date and datetime.time
     today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
     today_end = datetime.datetime.combine(datetime.date.today(), datetime.time.max)
     existing_checkin = MoodCheckin.query.filter(
@@ -399,8 +396,7 @@ def add_mood_checkin():
     ).first()
 
     if existing_checkin:
-        return jsonify(msg="You have already checked in today."), 409 # 409 Conflict
-    # ---------------------------------------------------
+        return jsonify(msg="You have already checked in today."), 409
 
     data = request.get_json()
     mood = data.get('mood')
@@ -445,16 +441,13 @@ def get_activity_summary():
     """Gets a summary of user activities for the dashboard."""
     user_id = get_jwt_identity()
 
-    # Calculate journal entries in the last 7 days
     seven_days_ago = dt.utcnow() - timedelta(days=7)
     journal_count = JournalEntry.query.filter(
         JournalEntry.user_id == user_id,
         JournalEntry.timestamp >= seven_days_ago
     ).count()
 
-    # Placeholder for assessments completed
-    # In a real app, you would query an 'AssessmentResult' table
-    assessment_count = 1 # Mock data for now
+    assessment_count = 1 
 
     return jsonify({
         "journalEntriesThisWeek": journal_count,
