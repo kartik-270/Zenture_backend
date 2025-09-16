@@ -281,7 +281,11 @@ def book_appointment():
     if not all([counselor_id, appointment_date, mode]):
         return jsonify({"error": "Counselor ID, date, and mode are required"}), 400
     
-    counselor = User.query.get(counselor_id)
+    try:
+        counselor = User.query.get(int(counselor_id))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid counselor ID format."}), 400
+    
     if not counselor or counselor.role != UserRole.COUNSELOR:
         return jsonify({"error": "Counselor not found or invalid"}), 404
 
