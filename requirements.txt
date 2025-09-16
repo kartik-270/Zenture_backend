@@ -8,3 +8,5 @@ Flask-Cors
 psycopg2-binary
 Flask-Mail
 gunicorn
+Flask-SocketIO
+Flask-APScheduler

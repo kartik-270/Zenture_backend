@@ -96,6 +96,9 @@ class Appointment(db.Model):
     appointment_time = db.Column(db.DateTime, nullable=False)
     status = db.Column(db.String(20), default='booked', nullable=False)
     notes = db.Column(db.Text, nullable=True)
+    # UPDATED: Changed default and comment to reflect frontend options
+    mode = db.Column(db.String(20), nullable=False, default='video_call') # Modes: 'video_call', 'voice_call', 'message', 'in_person'
+    meeting_link = db.Column(db.String(255), nullable=True) 
     student = db.relationship('User', foreign_keys=[student_id])
     counselor = db.relationship('User', foreign_keys=[counselor_id])
 
@@ -123,4 +126,3 @@ class ForumReply(db.Model):
     content = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     author = db.relationship('User', backref='forum_replies')
-

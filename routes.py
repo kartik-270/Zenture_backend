@@ -11,6 +11,7 @@ import datetime
 from datetime import timedelta, datetime as dt
 import re
 import random
+import uuid # Import uuid for generating unique links
 from flask_mail import Message
 
 api_bp = Blueprint('api', __name__)
@@ -238,7 +239,7 @@ def book_appointment():
     
     counselor_id = data.get('counselor_id')
     appointment_date = data.get('appointment_date')
-    mode = data.get('mode')
+    mode = data.get('mode') # Get mode from frontend (e.g., 'video_call', 'in_person')
     description = data.get('description')
 
     if not all([counselor_id, appointment_date, mode]):
@@ -252,12 +253,20 @@ def book_appointment():
     if not appointment_time:
         return jsonify({"error": "Invalid date format or value."}), 400
 
+    # --- FIX: Generate a meeting link only for 'video_call' mode ---
+    meeting_link = None
+    if mode == 'video_call':
+        meeting_link = f"/session/{uuid.uuid4()}"
+    # -----------------------------------------------------------------
+
     new_appointment = Appointment(
         student_id=student_id,
         counselor_id=counselor.id,
         appointment_time=appointment_time,
         status="booked",
-        notes=description
+        notes=description,
+        mode=mode, # Save the mode from the frontend
+        meeting_link=meeting_link
     )
     db.session.add(new_appointment)
     db.session.commit()
@@ -270,7 +279,8 @@ def book_appointment():
             "time": appointment_time.strftime("%H:%M"),
             "mode": mode,
             "description": description,
-            "status": new_appointment.status
+            "status": new_appointment.status,
+            "meeting_link": new_appointment.meeting_link
         }
     }), 201
 
@@ -293,7 +303,9 @@ def get_appointments():
         "student_id": a.student_id,
         "counselor_id": a.counselor_id,
         "appointment_time": a.appointment_time.isoformat(),
-        "status": a.status
+        "status": a.status,
+        "mode": a.mode,
+        "meeting_link": a.meeting_link
     } for a in appointments])
 
 # --- Forum Endpoints ---
@@ -438,7 +450,6 @@ def get_mood_history():
 @api_bp.route('/dashboard/activity-summary', methods=['GET'])
 @jwt_required()
 def get_activity_summary():
-    """Gets a summary of user activities for the dashboard."""
     user_id = get_jwt_identity()
 
     seven_days_ago = dt.utcnow() - timedelta(days=7)
@@ -453,4 +464,3 @@ def get_activity_summary():
         "journalEntriesThisWeek": journal_count,
         "assessmentsCompleted": assessment_count
     })
-
