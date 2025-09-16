@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from models import (
     db, User, UserRole, VerificationCode, ConfidentialData, 
-    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin
+    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin, JournalEntry
 )
 from extensions import mail
 
@@ -438,4 +438,26 @@ def get_mood_history():
     } for c in checkins]
     
     return jsonify(history)
+
+@api_bp.route('/dashboard/activity-summary', methods=['GET'])
+@jwt_required()
+def get_activity_summary():
+    """Gets a summary of user activities for the dashboard."""
+    user_id = get_jwt_identity()
+
+    # Calculate journal entries in the last 7 days
+    seven_days_ago = dt.utcnow() - timedelta(days=7)
+    journal_count = JournalEntry.query.filter(
+        JournalEntry.user_id == user_id,
+        JournalEntry.timestamp >= seven_days_ago
+    ).count()
+
+    # Placeholder for assessments completed
+    # In a real app, you would query an 'AssessmentResult' table
+    assessment_count = 1 # Mock data for now
+
+    return jsonify({
+        "journalEntriesThisWeek": journal_count,
+        "assessmentsCompleted": assessment_count
+    })
 
