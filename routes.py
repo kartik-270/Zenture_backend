@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from models import (
     db, User, UserRole, VerificationCode, ConfidentialData, 
-    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory,MoodCheckin
+    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin
 )
 from extensions import mail
 
@@ -262,7 +262,6 @@ def book_appointment():
     db.session.add(new_appointment)
     db.session.commit()
     
-    # --- CORRECTED RETURN STATEMENT ---
     return jsonify({
         "message": "Appointment confirmed!",
         "appointment": {
@@ -274,7 +273,6 @@ def book_appointment():
             "status": new_appointment.status
         }
     }), 201
-    # -----------------------------------
 
 @api_bp.route('/appointments', methods=['GET'])
 @jwt_required()
@@ -362,18 +360,54 @@ def reply_to_post(post_id):
     db.session.commit()
     return jsonify(msg="Reply posted successfully"), 201
 
+# --- Dashboard Endpoints ---
+
+@api_bp.route('/mood-checkin/today', methods=['GET'])
+@jwt_required()
+def get_today_mood_checkin():
+    """Checks if the current user has already submitted a mood today."""
+    user_id = get_jwt_identity()
+    # FIX: Use datetime.date and datetime.time
+    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
+    today_end = datetime.datetime.combine(datetime.date.today(), datetime.time.max)
+
+    checkin = MoodCheckin.query.filter(
+        MoodCheckin.user_id == user_id,
+        MoodCheckin.timestamp >= today_start,
+        MoodCheckin.timestamp <= today_end
+    ).first()
+
+    if checkin:
+        return jsonify({"hasCheckedIn": True, "mood": checkin.mood})
+    else:
+        return jsonify({"hasCheckedIn": False})
+
 @api_bp.route('/mood-checkin', methods=['POST'])
 @jwt_required()
 def add_mood_checkin():
-    data = request.get_json()
+    """Adds a mood check-in for the current user, if one for today doesn't exist."""
     user_id = get_jwt_identity()
+    
+    # --- Check for existing entry on the same day ---
+    # FIX: Use datetime.date and datetime.time
+    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
+    today_end = datetime.datetime.combine(datetime.date.today(), datetime.time.max)
+    existing_checkin = MoodCheckin.query.filter(
+        MoodCheckin.user_id == user_id,
+        MoodCheckin.timestamp >= today_start,
+        MoodCheckin.timestamp <= today_end
+    ).first()
+
+    if existing_checkin:
+        return jsonify(msg="You have already checked in today."), 409 # 409 Conflict
+    # ---------------------------------------------------
+
+    data = request.get_json()
     mood = data.get('mood')
     
     if not mood:
         return jsonify(msg="Mood is required"), 400
 
-    # Optional: You can also parse the date from the frontend if needed
-    # timestamp = dt.fromisoformat(data.get('date'))
     new_checkin = MoodCheckin(user_id=user_id, mood=mood)
     db.session.add(new_checkin)
     db.session.commit()
@@ -404,3 +438,4 @@ def get_mood_history():
     } for c in checkins]
     
     return jsonify(history)
+

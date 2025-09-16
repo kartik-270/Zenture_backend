@@ -24,15 +24,38 @@ class User(db.Model):
     def check_password(self, password):
         return bcrypt.check_password_hash(self.password_hash, password)
 
-# --- NEW MODEL FOR DASHBOARD ---
+# --- MODELS FOR DASHBOARD FUNCTIONALITY ---
+
 class MoodCheckin(db.Model):
+    __tablename__ = 'mood_checkin'
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     mood = db.Column(db.String(50), nullable=False)  # e.g., 'Stressed', 'Good'
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.datetime.utcnow)
     
     user = db.relationship('User', backref=db.backref('mood_checkins', lazy=True))
-# --------------------------------
+
+class JournalEntry(db.Model):
+    __tablename__ = 'journal_entry'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    entry_type = db.Column(db.String(50), default='reflection') # e.g., 'gratitude', 'reflection'
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    
+    user = db.relationship('User', backref=db.backref('journal_entries', lazy=True))
+
+class UserActivityLog(db.Model):
+    __tablename__ = 'user_activity_log'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    resource_id = db.Column(db.Integer, db.ForeignKey('resource.id'), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    
+    user = db.relationship('User', backref=db.backref('activity_logs', lazy=True))
+    resource = db.relationship('Resource', backref=db.backref('activity_logs', lazy=True))
+    
+# -------------------------------------------
 
 class ChatHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -100,3 +123,4 @@ class ForumReply(db.Model):
     content = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     author = db.relationship('User', backref='forum_replies')
+
