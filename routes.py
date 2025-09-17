@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify
+from flask_cors import CORS # Import CORS
 from models import (
     db, User, UserRole, VerificationCode, ConfidentialData, 
     Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin, JournalEntry,Notification, UserActivityLog
@@ -15,6 +16,8 @@ import uuid # Import uuid for generating unique links
 from flask_mail import Message
 
 api_bp = Blueprint('api', __name__)
+CORS(api_bp) # Enable CORS for all routes in this blueprint
+
 def send_username_email(email, username):
     try:
         subject = "Your Username for Mental Health Platform"
@@ -31,7 +34,8 @@ If you did not request this, please ignore this email.
     except Exception as e:
         print(f"Error sending email: {e}")
         return False
-api_bp.route('/forgot-username', methods=['POST'])
+
+@api_bp.route('/forgot-username', methods=['POST'])
 def forgot_username():
     data = request.get_json()
     email = data.get('email')
@@ -55,6 +59,9 @@ def forgot_username():
         return jsonify(msg="Could not send username email. Please try again later."), 500
     
     return jsonify(msg="If an account with that email exists, the username has been sent."), 200
+
+# ... (all other routes follow)
+
 @api_bp.route('/admin/register', methods=['POST'])
 def register_admin():
     data = request.get_json()
