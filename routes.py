@@ -15,7 +15,46 @@ import uuid # Import uuid for generating unique links
 from flask_mail import Message
 
 api_bp = Blueprint('api', __name__)
+def send_username_email(email, username):
+    try:
+        subject = "Your Username for Mental Health Platform"
+        msg = Message(subject, recipients=[email])
+        msg.body = f"""
+Hello,
 
+You requested your username. Your username is: {username}
+
+If you did not request this, please ignore this email.
+"""
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        return False
+api_bp.route('/forgot-username', methods=['POST'])
+def forgot_username():
+    data = request.get_json()
+    email = data.get('email')
+    
+    if not email:
+        return jsonify(msg="Email is required."), 400
+    
+    # Hash the provided email to check against the stored hash
+    user = None
+    for u in User.query.all():
+        if u.email_hash and bcrypt.check_password_hash(u.email_hash, email):
+            user = u
+            break
+            
+    if not user:
+        # For security, we give a generic success message even if the email isn't found
+        # to prevent malicious users from discovering valid emails.
+        return jsonify(msg="If an account with that email exists, the username has been sent."), 200
+        
+    if not send_username_email(email, user.username):
+        return jsonify(msg="Could not send username email. Please try again later."), 500
+    
+    return jsonify(msg="If an account with that email exists, the username has been sent."), 200
 @api_bp.route('/admin/register', methods=['POST'])
 def register_admin():
     data = request.get_json()
