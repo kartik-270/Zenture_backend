@@ -17,7 +17,8 @@ class User(db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(128), nullable=False)
     role = db.Column(db.Enum(UserRole), default=UserRole.STUDENT, nullable=False)
-    
+    email_hash = db.Column(db.String(128), unique=True, nullable=True) # New column for email hash
+
     def set_password(self, password):
         self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
 

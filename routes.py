@@ -142,8 +142,14 @@ def register_verify_and_create():
     if not bcrypt.check_password_hash(verification.code_hash, otp):
         return jsonify(msg="Invalid verification code."), 401
 
+    for u in User.query.all():
+        if u.email_hash and bcrypt.check_password_hash(u.email_hash, email):
+            return jsonify(msg="An account with this email already exists."), 409
+
     unique_username = generate_unique_username()
-    new_user = User(username=unique_username, role=UserRole.STUDENT)
+    email_hash = bcrypt.generate_password_hash(email).decode('utf-8')
+
+    new_user = User(username=unique_username, email_hash=email_hash, role=UserRole.STUDENT)
     new_user.set_password(password)
     
     db.session.add(new_user)
@@ -151,6 +157,7 @@ def register_verify_and_create():
     db.session.commit()
     
     return jsonify(msg="Account created successfully. Please log in with your unique username.", username=unique_username), 201
+
 
 @api_bp.route('/register/complete-profile', methods=['POST'])
 @jwt_required()
