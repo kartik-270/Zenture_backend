@@ -862,6 +862,5 @@ def get_single_counsellor_profile(user_id):
     return jsonify({
         "name": counselor_user.username,
         "specialization": profile.specialization,
-        "bio": profile.bio,
         "available_slots": available_slots,
     }), 200
