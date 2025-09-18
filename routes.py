@@ -15,7 +15,7 @@ import datetime
 from datetime import timedelta, datetime as dt
 import re
 import random
-import uuid # Import uuid for generating unique links
+import uuid 
 from flask_mail import Message
 
 api_bp = Blueprint('api', __name__)
@@ -193,6 +193,25 @@ def register_admin():
     db.session.commit()
 
     return jsonify(msg="Admin registered successfully"), 201
+@api_bp.route('/counsellor/register', methods=['POST'])
+def register_counsellor():
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify(msg="Username and password are required"), 400
+
+    if User.query.filter_by(username=username).first():
+        return jsonify(msg="Username already exists"), 409
+
+    new_counsellor = User(username=username, role=UserRole.COUNSELOR)
+    new_counsellor.set_password(password)
+
+    db.session.add(new_counsellor)
+    db.session.commit()
+
+    return jsonify(msg="Counsellor registered successfully"), 201
 
 def send_verification_email(email, code):
     try:
