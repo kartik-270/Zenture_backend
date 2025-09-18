@@ -899,7 +899,7 @@ def get_single_counsellor_profile(user_id):
             ).all()
         ]
 
-        all_slots = ["09:00", "10:30", "12:00", "14:00", "15:30", "17:00"]
+        all_slots = ["09:00", "10:30","13:15" "12:00", "14:00", "15:30", "17:00"]
         free_slots = [slot for slot in all_slots if slot not in booked_slots]
 
         if free_slots:
