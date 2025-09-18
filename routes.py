@@ -760,9 +760,6 @@ def get_activity_summary():
 @api_bp.route('/student/dashboard-data', methods=['GET'])
 @roles_required('student')
 def get_student_dashboard_data():
-    """
-    Provides all necessary data for the student dashboard.
-    """
     try:
         student_id = get_jwt_identity()
         student = User.query.get(student_id)
@@ -771,7 +768,6 @@ def get_student_dashboard_data():
             return jsonify({"msg": "Student not found"}), 404
 
         now = datetime.datetime.utcnow()
-        # CORRECTED LOGIC: Define the window for active/upcoming sessions
         session_window_start = now - timedelta(minutes=50)
 
         upcoming_appointments_query = (
@@ -779,7 +775,6 @@ def get_student_dashboard_data():
             .join(User, Appointment.counselor_id == User.id)
             .filter(
                 Appointment.student_id == student_id,
-                # This is the fix: Get appointments that haven't ended yet
                 Appointment.appointment_time >= session_window_start 
             )
             .order_by(Appointment.appointment_time.asc())
@@ -790,7 +785,7 @@ def get_student_dashboard_data():
         appointments_data = [{
             'id': appt.id,
             'counsellorName': counsellor.username,
-            'date': appt.appointment_time.isoformat(),
+            'date': appt.appointment_time.isoformat() + "Z", # <-- FIX: Add "Z" for UTC
             'mode': appt.mode,
             'status': appt.status,
             'meeting_link': appt.meeting_link
@@ -816,9 +811,6 @@ def get_student_dashboard_data():
 @api_bp.route('/counsellor/dashboard-data', methods=['GET'])
 @roles_required('counselor')
 def get_counsellor_dashboard_data():
-    """
-    Provides all necessary data for the counsellor dashboard in a single call.
-    """
     try:
         counsellor_id = get_jwt_identity()
         counsellor = User.query.get(counsellor_id)
@@ -826,7 +818,6 @@ def get_counsellor_dashboard_data():
         if not counsellor:
             return jsonify({"msg": "Counselor not found"}), 404
 
-        # 1. Fetch all appointments for the counsellor
         appointments_query = (
             db.session.query(Appointment, User)
             .join(User, Appointment.student_id == User.id)
@@ -835,29 +826,22 @@ def get_counsellor_dashboard_data():
             .all()
         )
         
-        # CORRECTED appointments_data list
         appointments_data = [{
             'id': appt.id,
             'studentName': student.username,
-            'date': appt.appointment_time.isoformat(),
+            'date': appt.appointment_time.isoformat() + "Z", # <-- FIX: Add "Z" for UTC
             'mode': appt.mode,
             'status': appt.status,
-            'meeting_link': appt.meeting_link, # <<< THIS LINE IS THE FIX
+            'meeting_link': appt.meeting_link,
         } for appt, student in appointments_query]
 
-        # 2. Generate a unique list of clients from the appointments
         distinct_student_ids = db.session.query(Appointment.student_id)\
             .filter_by(counselor_id=counsellor_id).distinct()
         
         client_users = User.query.filter(User.id.in_(distinct_student_ids)).all()
 
-        clients_data = [{
-            'name': user.username,
-            'status': 'Active',
-            'rating': 4.5,
-        } for user in client_users]
+        clients_data = [{'name': user.username, 'status': 'Active', 'rating': 4.5} for user in client_users]
 
-        # 3. Combine all data into a single response
         dashboard_data = {
             'counsellorName': counsellor.username,
             'appointments': appointments_data,
@@ -869,6 +853,7 @@ def get_counsellor_dashboard_data():
     except Exception as e:
         print(f"Error fetching counsellor dashboard data: {e}")
         return jsonify({"msg": "An error occurred while fetching dashboard data"}), 500
+
 # Add this new route in routes.py under the --- Counselor and Appointment Endpoints --- section
 
 @api_bp.route('/counsellor/create-profile', methods=['POST'])
