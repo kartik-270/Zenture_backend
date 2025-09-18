@@ -756,9 +756,48 @@ def get_activity_summary():
         "assessmentsCompleted": assessment_count
     })
 # Add this new endpoint to routes.py for the student dashboard
-@api_bp.route("/counselor/profile/<int:user_id>", methods=["GET"])
+# @api_bp.route("/counselor/profile/<int:user_id>", methods=["GET"])
+# @jwt_required()
+# def get_counselor_profile(user_id):
+#     date_str = request.args.get("date")
+#     if not date_str:
+#         return jsonify({"error": "Missing required query parameter: date"}), 400
+
+#     try:
+#         date_obj = dt.strptime(date_str, "%Y-%m-%d").date()
+#     except ValueError:
+#         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+
+#     counselor = CounselorProfile.query.filter_by(id=user_id).first()
+#     if not counselor:
+#         return jsonify({"error": "Counselor not found"}), 404
+
+#     # Define working hours (dummy slots, you can replace with dynamic logic)
+#     available_slots = ["10:00", "11:00", "14:00", "15:00", "16:00","14:30","15:30","16:30",]
+
+#     # Fetch booked appointments for this counselor on given date
+#     booked = Appointment.query.filter_by(
+#         counselor_id=user_id,
+#         appointment_date=date_obj
+#     ).all()
+
+#     booked_times = [appt.appointment_time.strftime("%H:%M") for appt in booked]
+#     free_slots = [slot for slot in available_slots if slot not in booked_times]
+
+#     return jsonify({
+#         "counselor_id": counselor.user_id,
+#         "name": counselor.user.username,
+#         "specialization": counselor.specialization,
+#         "available_slots": [
+#             {
+#                 "date": date_str,
+#                 "slots": free_slots
+#             }
+#         ]
+#     })
+@api_bp.route("/counselor/profile/<int:profile_id>", methods=["GET"])
 @jwt_required()
-def get_counselor_profile(user_id):
+def get_counselor_profile(profile_id):
     date_str = request.args.get("date")
     if not date_str:
         return jsonify({"error": "Missing required query parameter: date"}), 400
@@ -768,32 +807,29 @@ def get_counselor_profile(user_id):
     except ValueError:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
-    counselor = CounselorProfile.query.filter_by(id=user_id).first()
-    if not counselor:
+    counselor_profile = CounselorProfile.query.filter_by(id=profile_id).first()
+    if not counselor_profile:
         return jsonify({"error": "Counselor not found"}), 404
 
-    # Define working hours (dummy slots, you can replace with dynamic logic)
-    available_slots = ["10:00", "11:00", "14:00", "15:00", "16:00","14:30","15:30","16:30",]
-
-    # Fetch booked appointments for this counselor on given date
-    booked = Appointment.query.filter_by(
-        counselor_id=user_id,
-        appointment_date=date_obj
+    # ✅ FIX: This section now correctly queries the database
+    start_of_day = dt.combine(date_obj, dt.min)
+    end_of_day = dt.combine(date_obj, dt.max)
+    
+    booked_appointments = Appointment.query.filter(
+        Appointment.counselor_id == counselor_profile.user_id, 
+        # Querying the correct 'appointment_time' column within a date range
+        Appointment.appointment_time.between(start_of_day, end_of_day)
     ).all()
 
-    booked_times = [appt.appointment_time.strftime("%H:%M") for appt in booked]
-    free_slots = [slot for slot in available_slots if slot not in booked_times]
+    booked_times = {appt.appointment_time.strftime("%H:%M") for appt in booked_appointments}
+    all_possible_slots = ["10:00", "11:00", "14:00", "15:00", "16:00", "14:30", "15:30", "16:30"]
+    free_slots = [slot for slot in all_possible_slots if slot not in booked_times]
 
     return jsonify({
-        "counselor_id": counselor.user_id,
-        "name": counselor.user.username,
-        "specialization": counselor.specialization,
-        "available_slots": [
-            {
-                "date": date_str,
-                "slots": free_slots
-            }
-        ]
+        "counselor_id": counselor_profile.user_id,
+        "name": counselor_profile.user.username,
+        "specialization": counselor_profile.specialization,
+        "available_slots": free_slots
     })
 @api_bp.route('/student/dashboard-data', methods=['GET'])
 @roles_required('student')
