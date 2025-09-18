@@ -768,7 +768,7 @@ def get_counselor_profile(user_id):
     except ValueError:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
-    counselor = CounselorProfile.query.filter_by(user_id=user_id).first()
+    counselor = CounselorProfile.query.filter_by(id=user_id).first()
     if not counselor:
         return jsonify({"error": "Counselor not found"}), 404
 
