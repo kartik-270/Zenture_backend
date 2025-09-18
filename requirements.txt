@@ -10,3 +10,4 @@ Flask-Mail
 gunicorn
 Flask-SocketIO
 Flask-APScheduler
+transformers

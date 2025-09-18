@@ -1,12 +1,15 @@
 from flask import Blueprint, request, jsonify
-from flask_cors import CORS # Import CORS
+from flask_cors import CORS
+from transformers import pipeline
+import re
+import os 
 from models import (
     db, User, UserRole, VerificationCode, ConfidentialData, 
     Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin, JournalEntry,Notification, UserActivityLog
 )
 from extensions import mail
-
-from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, get_jwt
+from followupquestions import FOLLOW_UP_QUESTIONS
+from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, get_jwt,get_jwt_header
 from functools import wraps
 import datetime
 from datetime import timedelta, datetime as dt
@@ -17,6 +20,115 @@ from flask_mail import Message
 
 api_bp = Blueprint('api', __name__)
 CORS(api_bp) # Enable CORS for all routes in this blueprint
+
+try:
+    LISTENER_PIPE = pipeline("text-classification", model="./listener_model", tokenizer="./listener_model")
+    RESPONDER_PIPE = pipeline("text-generation", model="./responder_model", tokenizer="./responder_model")
+    CHATBOT_MODELS_LOADED = True
+    print("Chatbot models loaded successfully.")
+except Exception as e:
+    LISTENER_PIPE = None
+    RESPONDER_PIPE = None
+    CHATBOT_MODELS_LOADED = False
+    print(f"Failed to load chatbot models: {e}")
+
+CRISIS_RESPONSE = "I'm so sorry you're going through this. Please know that help is available. You can connect with someone immediately by calling 988 in the US or finding a local crisis hotline. Your life is important, and support is available."
+
+@api_bp.route('/chatbot', methods=['POST'])
+def chatbot_endpoint():
+    if not CHATBOT_MODELS_LOADED:
+        return jsonify(response="The chatbot models are not available. Please contact support.", followUps=[]), 503
+
+    user_id = None
+    try:
+        if get_jwt_header():
+            user_id = get_jwt_identity()
+    except Exception as e:
+        pass
+
+    data = request.get_json()
+    user_input = data.get('message', '')
+    # Get the conversation ID from the frontend; generate a new one if it's the first message
+    conversation_id = data.get('conversation_id', str(uuid.uuid4()))
+
+    if not user_input:
+        return jsonify(response="Please provide a message.", followUps=[], conversation_id=conversation_id), 400
+
+    # Step 1: Listener Model to classify user input
+    try:
+        analysis_result = LISTENER_PIPE(user_input)[0]
+        predicted_label = analysis_result['label']
+        confidence_score = analysis_result['score']
+    except Exception as e:
+        print(f"Listener model error: {e}")
+        return jsonify(response="I'm having trouble understanding that right now. Could you please rephrase?", followUps=[], conversation_id=conversation_id), 500
+
+    # Step 2: Triage based on the Listener Model's prediction
+    if predicted_label == "Suicidal" and confidence_score > 0.8:
+        bot_response = CRISIS_RESPONSE
+        if user_id:
+            try:
+                # Save both user and bot messages with the same conversation ID
+                user_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='user', message=user_input)
+                bot_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='bot', message=bot_response)
+                db.session.add(user_entry)
+                db.session.add(bot_entry)
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"Failed to save chat history: {e}")
+        return jsonify(response=bot_response, followUps=[], conversation_id=conversation_id), 200
+
+    # Step 3: Get follow-up questions for the predicted label
+    follow_ups = FOLLOW_UP_QUESTIONS.get(predicted_label, ["How can I help you today?"])
+    
+    # Step 4: Retrieve conversation history from the database (for logged-in users)
+    prompt_history = ""
+    if user_id:
+        conversation_history = ChatHistory.query.filter_by(
+            user_id=user_id,
+            conversation_id=conversation_id
+        ).order_by(ChatHistory.timestamp.asc()).all()
+        
+        # Format the history for the responder model
+        for turn in conversation_history:
+            prompt_history += f"<{turn.sender}> {turn.message} "
+
+    # Step 5: Generate a response using the full prompt
+    try:
+        full_prompt = f"The user's condition is {predicted_label}. {prompt_history} <user> {user_input} Bot: "
+        
+        response = RESPONDER_PIPE(
+            full_prompt, 
+            max_length=100, 
+            do_sample=True, 
+            top_k=50, 
+            top_p=0.95,
+            pad_token_id=RESPONDER_PIPE.tokenizer.eos_token_id
+        )
+        
+        generated_text = response[0]['generated_text']
+        bot_response = generated_text.split("Bot: ")[-1].strip()
+        
+    except Exception as e:
+        print(f"Responder model error: {e}")
+        return jsonify(response="I'm not able to generate a response right now. Please try again later.", followUps=[], conversation_id=conversation_id), 500
+
+    # Step 6: Save chat history for logged-in users
+    if user_id:
+        try:
+            # Save both the user and bot message with the same conversation ID
+            user_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='user', message=user_input)
+            bot_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='bot', message=bot_response)
+            db.session.add(user_entry)
+            db.session.add(bot_entry)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Failed to save chat history: {e}")
+
+    # Return the response, follow-up questions, and the conversation ID
+    return jsonify(response=bot_response, followUps=follow_ups, conversation_id=conversation_id), 200
 
 def send_username_email(email, username):
     try:
@@ -296,6 +408,41 @@ def admin_dashboard_data():
             "totalAppointments": appointment_count
         }
     }), 200
+
+# NEW ENDPOINT: Fetch upcoming appointments for admin dashboard
+@api_bp.route('/admin/upcoming-appointments', methods=['GET'])
+@roles_required('admin')
+def get_upcoming_appointments():
+    """
+    Fetches a list of upcoming appointments for the admin dashboard.
+    """
+    try:
+        # Query for upcoming appointments that are booked and in the future
+        upcoming_appointments = (
+            db.session.query(Appointment, User)
+            .join(User, Appointment.student_id == User.id)
+            .filter(
+                Appointment.status == 'booked',
+                Appointment.appointment_time >= datetime.datetime.utcnow()
+            )
+            .order_by(Appointment.appointment_time.asc())
+            .limit(5)
+            .all()
+        )
+
+        appointments_list = [
+            {
+                "student_username": user.username,
+                "appointment_time": appointment.appointment_time.isoformat()
+            }
+            for appointment, user in upcoming_appointments
+        ]
+
+        return jsonify(appointments_list), 200
+    except Exception as e:
+        print(f"Error fetching upcoming appointments: {e}")
+        return jsonify({"error": "An internal error occurred."}), 500
+
 @api_bp.route("/counselors", methods=["GET"])
 @jwt_required()
 def get_counselors():

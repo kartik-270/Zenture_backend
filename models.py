@@ -17,7 +17,7 @@ class User(db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(128), nullable=False)
     role = db.Column(db.Enum(UserRole), default=UserRole.STUDENT, nullable=False)
-    email_hash = db.Column(db.String(128), unique=True, nullable=True) # New column for email hash
+    email_hash = db.Column(db.String(128), unique=True, nullable=True)
 
     def set_password(self, password):
         self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
@@ -31,7 +31,7 @@ class MoodCheckin(db.Model):
     __tablename__ = 'mood_checkin'
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    mood = db.Column(db.String(50), nullable=False)  # e.g., 'Stressed', 'Good'
+    mood = db.Column(db.String(50), nullable=False)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.datetime.utcnow)
     
     user = db.relationship('User', backref=db.backref('mood_checkins', lazy=True))
@@ -41,7 +41,7 @@ class JournalEntry(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     content = db.Column(db.Text, nullable=False)
-    entry_type = db.Column(db.String(50), default='reflection') # e.g., 'gratitude', 'reflection'
+    entry_type = db.Column(db.String(50), default='reflection')
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     
     user = db.relationship('User', backref=db.backref('journal_entries', lazy=True))
@@ -61,11 +61,11 @@ class UserActivityLog(db.Model):
 class ChatHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    conversation_id = db.Column(db.String(100), nullable=False, index=True)
-    botpress_payload = db.Column(db.JSON, nullable=True) 
-    user_message = db.Column(db.Text, nullable=True)
-    bot_response = db.Column(db.Text, nullable=True)
+    user_message = db.Column(db.Text, nullable=False)
+    bot_response = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    conversation_id = db.Column(db.String(36), nullable=False, index=True)
+
     user = db.relationship('User', backref=db.backref('chat_history', lazy=True))
 
 class ConfidentialData(db.Model):
