@@ -493,12 +493,13 @@ def book_appointment():
     student_id = get_jwt_identity()
     
     counselor_id = data.get('counselor_id')
-    appointment_date = data.get('appointment_date')
+    appointment_date_str = data.get('appointment_date')
+    appointment_time_str = data.get('appointment_time')
     mode = data.get('mode') # Get mode from frontend (e.g., 'video_call', 'in_person')
     description = data.get('description')
 
-    if not all([counselor_id, appointment_date, mode]):
-        return jsonify({"error": "Counselor ID, date, and mode are required"}), 400
+    if not all([counselor_id, appointment_date_str, appointment_time_str, mode]):
+        return jsonify({"error": "Counselor ID, date, time, and mode are required"}), 400
     
     try:
         counselor = User.query.get(int(counselor_id))
@@ -508,9 +509,21 @@ def book_appointment():
     if not counselor or counselor.role != UserRole.COUNSELOR:
         return jsonify({"error": "Counselor not found or invalid"}), 404
 
-    appointment_time = generate_random_slot(appointment_date)
-    if not appointment_time:
-        return jsonify({"error": "Invalid date format or value."}), 400
+    try:
+        # Combine date and time strings and parse into a single datetime object
+        combined_dt_str = f"{appointment_date_str} {appointment_time_str}"
+        appointment_time = dt.strptime(combined_dt_str, "%Y-%m-%d %H:%M")
+    except ValueError:
+        return jsonify({"error": "Invalid date or time format."}), 400
+
+    # Check if the slot is already booked
+    existing_appointment = Appointment.query.filter(
+        Appointment.counselor_id == counselor_id,
+        Appointment.appointment_time == appointment_time
+    ).first()
+
+    if existing_appointment:
+        return jsonify({"error": "This time slot is already booked. Please choose another one."}), 409
 
     # Rectified: Generate a meeting link only for 'video_call' mode
     meeting_link = None
