@@ -193,6 +193,22 @@ def register_admin():
     db.session.commit()
 
     return jsonify(msg="Admin registered successfully"), 201
+@api_bp.route("/counsellor/appointments", methods=["GET"])
+@jwt_required()
+def get_counsellor_appointments():
+    user_id = int(get_jwt_identity())  # make sure it's int
+    appointments = Appointment.query.filter_by(counsellor_id=user_id).all()
+
+    return jsonify([
+        {
+            "id": a.id,
+            "studentName": a.student.name if a.student else "Unknown",
+            "date": a.date.isoformat(),
+            "mode": a.mode,
+            "status": a.status
+        }
+        for a in appointments
+    ])
 @api_bp.route('/counsellor/register', methods=['POST'])
 def register_counsellor():
     data = request.get_json()

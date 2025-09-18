@@ -102,6 +102,8 @@ class Appointment(db.Model):
     meeting_link = db.Column(db.String(255), nullable=True) 
     student = db.relationship('User', foreign_keys=[student_id])
     counselor = db.relationship('User', foreign_keys=[counselor_id])
+    session_started_at = db.Column(db.DateTime, nullable=True)
+    session_ended_at = db.Column(db.DateTime, nullable=True)
 
 class Resource(db.Model):
     id = db.Column(db.Integer, primary_key=True)
