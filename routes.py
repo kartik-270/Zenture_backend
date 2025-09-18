@@ -770,17 +770,20 @@ def get_student_dashboard_data():
         if not student:
             return jsonify({"msg": "Student not found"}), 404
 
-        # Fetch upcoming appointments for the student
         now = datetime.datetime.utcnow()
+        # CORRECTED LOGIC: Define the window for active/upcoming sessions
+        session_window_start = now - timedelta(minutes=50)
+
         upcoming_appointments_query = (
             db.session.query(Appointment, User)
             .join(User, Appointment.counselor_id == User.id)
             .filter(
                 Appointment.student_id == student_id,
-                Appointment.appointment_time >= now
+                # This is the fix: Get appointments that haven't ended yet
+                Appointment.appointment_time >= session_window_start 
             )
             .order_by(Appointment.appointment_time.asc())
-            .limit(5) # Fetch the next 5 upcoming appointments
+            .limit(5)
             .all()
         )
         
@@ -790,7 +793,7 @@ def get_student_dashboard_data():
             'date': appt.appointment_time.isoformat(),
             'mode': appt.mode,
             'status': appt.status,
-            'meeting_link': appt.meeting_link # IMPORTANT: Pass the meeting link
+            'meeting_link': appt.meeting_link
         } for appt, counsellor in upcoming_appointments_query]
         
         dashboard_data = {
