@@ -283,7 +283,7 @@ def register_start():
     
     otp = str(random.randint(100000, 999999))
     code_hash = bcrypt.generate_password_hash(otp).decode('utf-8')
-    expires_at = datetime.datetime.utcnow() + timedelta(minutes=10)
+    expires_at = dt.datetime.utcnow() + timedelta(minutes=10)
 
     VerificationCode.query.filter_by(email=email).delete()
 
@@ -311,7 +311,7 @@ def register_verify_and_create():
     if not verification:
         return jsonify(msg="Invalid email or code has expired."), 404
     
-    if datetime.datetime.utcnow() > verification.expires_at:
+    if dt.datetime.utcnow() > verification.expires_at:
         db.session.delete(verification)
         db.session.commit()
         return jsonify(msg="Verification code has expired."), 400
@@ -442,7 +442,7 @@ def get_upcoming_appointments():
             .join(User, Appointment.student_id == User.id)
             .filter(
                 Appointment.status == 'booked',
-                Appointment.appointment_time >= datetime.datetime.utcnow()
+                Appointment.appointment_time >= dt.datetime.utcnow()
             )
             .order_by(Appointment.appointment_time.asc())
             .limit(5)
@@ -670,8 +670,8 @@ def reply_to_post(post_id):
 def get_today_mood_checkin():
     """Checks if the current user has already submitted a mood today."""
     user_id = get_jwt_identity()
-    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
-    today_end = datetime.datetime.combine(datetime.date.today(), datetime.time.max)
+    today_start = dt.datetime.combine(dt.date.today(), dt.time.min)
+    today_end = dt.datetime.combine(dt.date.today(), dt.time.max)
 
     checkin = MoodCheckin.query.filter(
         MoodCheckin.user_id == user_id,
@@ -690,8 +690,8 @@ def add_mood_checkin():
     """Adds a mood check-in for the current user, if one for today doesn't exist."""
     user_id = get_jwt_identity()
     
-    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
-    today_end = datetime.datetime.combine(datetime.date.today(), datetime.time.max)
+    today_start =dt.datetime.combine(dt.date.today(), dt.time.min)
+    today_end = dt.datetime.combine(dt.date.today(), dt.time.max)
     existing_checkin = MoodCheckin.query.filter(
         MoodCheckin.user_id == user_id,
         MoodCheckin.timestamp >= today_start,
@@ -764,7 +764,7 @@ def get_counselor_profile(user_id):
         return jsonify({"error": "Missing required query parameter: date"}), 400
 
     try:
-        date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+        date_obj = dt.strptime(date_str, "%Y-%m-%d").date()
     except ValueError:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
@@ -805,7 +805,7 @@ def get_student_dashboard_data():
         if not student:
             return jsonify({"msg": "Student not found"}), 404
 
-        now = datetime.datetime.utcnow()
+        now = dt.datetime.utcnow()
         session_window_start = now - timedelta(minutes=50)
 
         upcoming_appointments_query = (
