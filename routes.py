@@ -9,7 +9,7 @@ from models import (
 )
 from extensions import mail
 from followupquestions import FOLLOW_UP_QUESTIONS
-from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, get_jwt,get_jwt_header
+from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, get_jwt, get_jwt_header
 from functools import wraps
 import datetime
 from datetime import timedelta, datetime as dt
@@ -585,7 +585,8 @@ def get_appointments():
         "meeting_link": a.meeting_link
     } for a in appointments])
 
-# --- Forum Endpoints ---
+# --- FORUM ENDPOINTS ---
+# (Existing forum routes)
 
 @api_bp.route('/forum/posts', methods=['GET'])
 @jwt_required()
@@ -741,3 +742,86 @@ def get_activity_summary():
         "journalEntriesThisWeek": journal_count,
         "assessmentsCompleted": assessment_count
     })
+
+
+# --- NEW COUNSELOR DASHBOARD ENDPOINTS ---
+# This endpoint fetches all appointments for the logged-in counselor.
+@api_bp.route('/counselor/appointments', methods=['GET'])
+@roles_required('counselor')
+def get_counsellor_appointments():
+    """
+    Fetches all appointments for the authenticated counselor.
+    """
+    try:
+        current_user_id = get_jwt_identity()
+
+        appointments = (
+            db.session.query(Appointment, User)
+            .join(User, Appointment.student_id == User.id)
+            .filter(Appointment.counselor_id == current_user_id)
+            .order_by(Appointment.appointment_time.asc())
+            .all()
+        )
+
+        appointments_data = []
+        for appt, student in appointments:
+            appointments_data.append({
+                'id': appt.id,
+                'studentName': student.username,
+                'date': appt.appointment_time.isoformat(),
+                'mode': appt.mode,
+                'status': appt.status,
+            })
+        
+        return jsonify(appointments_data), 200
+
+    except Exception as e:
+        print(f"Error fetching counselor appointments: {e}")
+        return jsonify({"msg": "An error occurred while fetching data"}), 500
+
+# This endpoint fetches a specific counselor's public profile and their available appointments.
+@api_bp.route('/counselor/profile/<int:user_id>', methods=['GET'])
+@jwt_required()
+def get_single_counsellor_profile(user_id):
+    """
+    Fetches a single counselor's profile and their available slots.
+    """
+    counselor_user = User.query.filter_by(id=user_id, role=UserRole.COUNSELOR).first()
+    if not counselor_user:
+        return jsonify({"msg": "Counselor not found"}), 404
+
+    profile = CounselorProfile.query.filter_by(user_id=user_id).first()
+    if not profile:
+        return jsonify({"msg": "Counselor profile not found"}), 404
+
+    # Dummy logic to provide available slots for a few days
+    available_slots = []
+    today = dt.utcnow().date()
+    for i in range(7):
+        date_to_check = today + timedelta(days=i)
+        
+        # Check for booked appointments to avoid double-booking
+        booked_slots = [
+            appt.appointment_time.strftime("%H:%M") for appt in 
+            Appointment.query.filter(
+                Appointment.counselor_id == user_id,
+                db.func.date(Appointment.appointment_time) == date_to_check
+            ).all()
+        ]
+
+        # Filter out booked slots from a list of all potential slots
+        all_slots = ["09:00", "10:30", "12:00", "14:00", "15:30", "17:00"]
+        free_slots = [slot for slot in all_slots if slot not in booked_slots]
+
+        if free_slots:
+            available_slots.append({
+                "date": date_to_check.isoformat(),
+                "slots": free_slots
+            })
+            
+    return jsonify({
+        "name": counselor_user.username,
+        "specialization": profile.specialization,
+        "bio": profile.bio,
+        "available_slots": available_slots,
+    }), 200
