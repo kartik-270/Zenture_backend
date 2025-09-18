@@ -19,7 +19,7 @@ import uuid
 from flask_mail import Message
 
 api_bp = Blueprint('api', __name__)
-CORS(api_bp) # Enable CORS for all routes in this blueprint
+CORS(api_bp, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True) # Enable CORS for all routes in this blueprint
 
 try:
     LISTENER_PIPE = pipeline("text-classification", model="./listener_model", tokenizer="./listener_model")
