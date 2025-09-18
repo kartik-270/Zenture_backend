@@ -193,22 +193,6 @@ def register_admin():
     db.session.commit()
 
     return jsonify(msg="Admin registered successfully"), 201
-@api_bp.route("/counsellor/appointments", methods=["GET"])
-@jwt_required()
-def get_counsellor_appointments():
-    user_id = int(get_jwt_identity())  # make sure it's int
-    appointments = Appointment.query.filter_by(counsellor_id=user_id).all()
-
-    return jsonify([
-        {
-            "id": a.id,
-            "studentName": a.student.name if a.student else "Unknown",
-            "date": a.date.isoformat(),
-            "mode": a.mode,
-            "status": a.status
-        }
-        for a in appointments
-    ])
 @api_bp.route('/counsellor/register', methods=['POST'])
 def register_counsellor():
     data = request.get_json()
@@ -775,7 +759,7 @@ def get_activity_summary():
 
 # --- NEW COUNSELOR DASHBOARD ENDPOINTS ---
 # This endpoint fetches all appointments for the logged-in counselor.
-@api_bp.route('/counselor/appointments', methods=['GET'])
+@api_bp.route('/counsellor/appointments', methods=['GET'])
 @roles_required('counselor')
 def get_counsellor_appointments():
     """
@@ -878,5 +862,6 @@ def get_single_counsellor_profile(user_id):
     return jsonify({
         "name": counselor_user.username,
         "specialization": profile.specialization,
+
         "available_slots": available_slots,
     }), 200
