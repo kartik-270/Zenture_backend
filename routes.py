@@ -865,3 +865,28 @@ def get_single_counsellor_profile(user_id):
 
         "available_slots": available_slots,
     }), 200
+# Add this new route in routes.py under the --- Counselor and Appointment Endpoints --- section
+
+@api_bp.route('/counsellor/create-profile', methods=['POST'])
+@roles_required('counselor') # Protects the route, ensuring only a logged-in counsellor can create a profile
+def create_counsellor_profile():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    specialization = data.get('specialization')
+
+    if not specialization:
+        return jsonify(msg="Specialization is required"), 400
+
+    # Check if a profile already exists for this user
+    if CounselorProfile.query.filter_by(user_id=user_id).first():
+        return jsonify(msg="Profile already exists for this counsellor"), 409
+
+    # Create the new counsellor profile
+    new_profile = CounselorProfile(
+        user_id=user_id,
+        specialization=specialization
+    )
+    db.session.add(new_profile)
+    db.session.commit()
+
+    return jsonify(msg="Counsellor profile created successfully"), 201
