@@ -807,17 +807,21 @@ def get_counselor_profile(profile_id):
     except ValueError:
         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
+    # Get the counselor profile
     counselor_profile = CounselorProfile.query.filter_by(id=profile_id).first()
     if not counselor_profile:
         return jsonify({"error": "Counselor not found"}), 404
 
-    # ✅ FIX: This section now correctly queries the database
-    start_of_day = dt.combine(date_obj, dt.min)
-    end_of_day = dt.combine(date_obj, dt.max)
+    # Get the user_id from the profile
+    counselor_user_id = counselor_profile.user_id
+
+    # Calculate start and end of day
+    start_of_day = dt.datetime.combine(date_obj, dt.time.min)
+    end_of_day = dt.datetime.combine(date_obj, dt.time.max)
     
+    # Query appointments for this counselor on this date
     booked_appointments = Appointment.query.filter(
-        Appointment.counselor_id == counselor_profile.user_id, 
-        # Querying the correct 'appointment_time' column within a date range
+        Appointment.counselor_id == counselor_user_id,
         Appointment.appointment_time.between(start_of_day, end_of_day)
     ).all()
 
@@ -826,11 +830,16 @@ def get_counselor_profile(profile_id):
     free_slots = [slot for slot in all_possible_slots if slot not in booked_times]
 
     return jsonify({
-        "counselor_id": counselor_profile.user_id,
-        "name": counselor_profile.user.username,
-        "specialization": counselor_profile.specialization,
-        "available_slots": free_slots
-    })
+    "counselor_id": counselor_user_id,
+    "name": counselor_profile.user.username,
+    "specialization": counselor_profile.specialization,
+    "available_slots": [
+        {
+            "date": date_str,
+            "slots": free_slots
+        }
+    ]
+})
 @api_bp.route('/student/dashboard-data', methods=['GET'])
 @roles_required('student')
 def get_student_dashboard_data():
