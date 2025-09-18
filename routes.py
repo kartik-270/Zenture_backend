@@ -755,7 +755,54 @@ def get_activity_summary():
         "journalEntriesThisWeek": journal_count,
         "assessmentsCompleted": assessment_count
     })
+# Add this new endpoint to routes.py for the student dashboard
 
+@api_bp.route('/student/dashboard-data', methods=['GET'])
+@roles_required('student')
+def get_student_dashboard_data():
+    """
+    Provides all necessary data for the student dashboard.
+    """
+    try:
+        student_id = get_jwt_identity()
+        student = User.query.get(student_id)
+
+        if not student:
+            return jsonify({"msg": "Student not found"}), 404
+
+        # Fetch upcoming appointments for the student
+        now = datetime.datetime.utcnow()
+        upcoming_appointments_query = (
+            db.session.query(Appointment, User)
+            .join(User, Appointment.counselor_id == User.id)
+            .filter(
+                Appointment.student_id == student_id,
+                Appointment.appointment_time >= now
+            )
+            .order_by(Appointment.appointment_time.asc())
+            .limit(5) # Fetch the next 5 upcoming appointments
+            .all()
+        )
+        
+        appointments_data = [{
+            'id': appt.id,
+            'counsellorName': counsellor.username,
+            'date': appt.appointment_time.isoformat(),
+            'mode': appt.mode,
+            'status': appt.status,
+            'meeting_link': appt.meeting_link # IMPORTANT: Pass the meeting link
+        } for appt, counsellor in upcoming_appointments_query]
+        
+        dashboard_data = {
+            'studentName': student.username,
+            'upcomingAppointments': appointments_data
+        }
+        
+        return jsonify(dashboard_data), 200
+
+    except Exception as e:
+        print(f"Error fetching student dashboard data: {e}")
+        return jsonify({"msg": "An error occurred while fetching student data"}), 500
 
 # --- NEW COUNSELOR DASHBOARD ENDPOINTS ---
 # This endpoint fetches all appointments for the logged-in counselor.
