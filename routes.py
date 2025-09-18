@@ -808,6 +808,8 @@ def get_student_dashboard_data():
 # This endpoint fetches all appointments for the logged-in counselor.
 # Add this new, consolidated endpoint to routes.py
 
+# In routes.py, REPLACE the entire get_counsellor_dashboard_data function with this corrected version
+
 @api_bp.route('/counsellor/dashboard-data', methods=['GET'])
 @roles_required('counselor')
 def get_counsellor_dashboard_data():
@@ -830,12 +832,14 @@ def get_counsellor_dashboard_data():
             .all()
         )
         
+        # CORRECTED appointments_data list
         appointments_data = [{
             'id': appt.id,
             'studentName': student.username,
             'date': appt.appointment_time.isoformat(),
             'mode': appt.mode,
             'status': appt.status,
+            'meeting_link': appt.meeting_link, # <<< THIS LINE IS THE FIX
         } for appt, student in appointments_query]
 
         # 2. Generate a unique list of clients from the appointments
@@ -846,8 +850,8 @@ def get_counsellor_dashboard_data():
 
         clients_data = [{
             'name': user.username,
-            'status': 'Active',  # You can enhance this logic later
-            'rating': 4.5,      # Placeholder rating
+            'status': 'Active',
+            'rating': 4.5,
         } for user in client_users]
 
         # 3. Combine all data into a single response
@@ -862,80 +866,6 @@ def get_counsellor_dashboard_data():
     except Exception as e:
         print(f"Error fetching counsellor dashboard data: {e}")
         return jsonify({"msg": "An error occurred while fetching dashboard data"}), 500
-
-# This endpoint fetches a specific counselor's public profile and their available appointments.
-@api_bp.route('/counselor/profile/<int:user_id>', methods=['GET'])
-@jwt_required()
-def get_single_counsellor_profile(user_id):
-    """
-    Fetches a single counselor's profile and their available slots for a given date.
-    """
-    counselor_user = User.query.filter_by(id=user_id, role=UserRole.COUNSELOR).first()
-    if not counselor_user:
-        return jsonify({"msg": "Counselor not found"}), 404
-
-    profile = CounselorProfile.query.filter_by(user_id=user_id).first()
-    if not profile:
-        return jsonify({"msg": "Counselor profile not found"}), 404
-
-    # Get the date from the query parameters
-    date_str = request.args.get('date')
-    
-    available_slots = []
-    
-    # Check if a specific date was provided
-    if date_str:
-        try:
-            date_to_check = dt.strptime(date_str, "%Y-%m-%d").date()
-        except ValueError:
-            return jsonify({"msg": "Invalid date format. Use YYYY-MM-DD."}), 400
-
-        # Check for booked appointments on the specific date
-        booked_slots = [
-            appt.appointment_time.strftime("%H:%M") for appt in 
-            Appointment.query.filter(
-                Appointment.counselor_id == user_id,
-                db.func.date(Appointment.appointment_time) == date_to_check
-            ).all()
-        ]
-
-        all_slots = ["09:00", "10:30","13:15" ,"","13:30","13:20","12:00", "14:00", "15:30", "17:00"]
-        free_slots = [slot for slot in all_slots if slot not in booked_slots]
-
-        if free_slots:
-            available_slots.append({
-                "date": date_to_check.isoformat(),
-                "slots": free_slots
-            })
-    else:
-        # If no date is provided, return a week's worth of dummy data
-        today = dt.utcnow().date()
-        for i in range(7):
-            date_to_check = today + timedelta(days=i)
-            
-            booked_slots = [
-                appt.appointment_time.strftime("%H:%M") for appt in 
-                Appointment.query.filter(
-                    Appointment.counselor_id == user_id,
-                    db.func.date(Appointment.appointment_time) == date_to_check
-                ).all()
-            ]
-
-            all_slots = ["09:00", "10:30", "12:00", "14:00", "15:30", "17:00"]
-            free_slots = [slot for slot in all_slots if slot not in booked_slots]
-
-            if free_slots:
-                available_slots.append({
-                    "date": date_to_check.isoformat(),
-                    "slots": free_slots
-                })
-            
-    return jsonify({
-        "name": counselor_user.username,
-        "specialization": profile.specialization,
-
-        "available_slots": available_slots,
-    }), 200
 # Add this new route in routes.py under the --- Counselor and Appointment Endpoints --- section
 
 @api_bp.route('/counsellor/create-profile', methods=['POST'])
