@@ -283,7 +283,7 @@ def register_start():
     
     otp = str(random.randint(100000, 999999))
     code_hash = bcrypt.generate_password_hash(otp).decode('utf-8')
-    expires_at = dt.datetime.utcnow() + timedelta(minutes=10)
+    expires_at = dt.utcnow() + timedelta(minutes=10)
 
     VerificationCode.query.filter_by(email=email).delete()
 
