@@ -95,7 +95,7 @@ class Appointment(db.Model):
     student_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     counselor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     appointment_time = db.Column(db.DateTime, nullable=False)
-    status = db.Column(db.String(20), default='booked', nullable=False)
+    status = db.Column(db.String(20), default='pending', nullable=False)
     notes = db.Column(db.Text, nullable=True)
     # UPDATED: Changed default and comment to reflect frontend options
     mode = db.Column(db.String(20), nullable=False, default='video_call') # Modes: 'video_call', 'voice_call', 'message', 'in_person'
@@ -109,9 +109,36 @@ class Resource(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(150), nullable=False)
     description = db.Column(db.Text, nullable=False)
-    type = db.Column(db.String(50), nullable=False)
+    type = db.Column(db.String(50), nullable=False) # video, audio, article
     language = db.Column(db.String(50), default='English')
-    url = db.Column(db.String(255), nullable=False)
+    url = db.Column(db.String(255), nullable=True) # Optional for articles
+    content = db.Column(db.Text, nullable=True) # For articles
+    status = db.Column(db.String(20), default='pending') # pending, licensed, rejected
+    author_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True) # Counselor who created it
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    
+    author = db.relationship('User', backref=db.backref('resources', lazy=True))
+
+class ChatMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    receiver_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    is_read = db.Column(db.Boolean, default=False)
+    
+    sender = db.relationship('User', foreign_keys=[sender_id], backref='sent_messages')
+    receiver = db.relationship('User', foreign_keys=[receiver_id], backref='received_messages')
+
+class ClientNote(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    counselor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    student_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    note = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    
+    counselor = db.relationship('User', foreign_keys=[counselor_id])
+    student = db.relationship('User', foreign_keys=[student_id])
     
 class ForumPost(db.Model):
     id = db.Column(db.Integer, primary_key=True)

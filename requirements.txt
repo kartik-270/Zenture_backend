@@ -12,3 +12,7 @@ Flask-SocketIO
 Flask-APScheduler
 transformers
 agora-token-builder
+torch
+datasets
+scikit-learn
+numpy

@@ -25,3 +25,16 @@ migrations/__pycache__/
 # System files
 .DS_Store
 Thumbs.db
+
+# Machine Learning Artifacts
+results_listener/
+results_responder/
+listener_model/
+responder_model/
+logs_listener/
+logs_responder/
+*.pth
+*.bin
+*.pt
+*.safetensors
+*.onnx

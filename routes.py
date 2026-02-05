@@ -1,21 +1,26 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_cors import CORS
 from transformers import pipeline
 import re
 import os 
+from werkzeug.utils import secure_filename
 from models import (
     db, User, UserRole, VerificationCode, ConfidentialData, 
-    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin, JournalEntry,Notification, UserActivityLog
+    Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin, JournalEntry,Notification, UserActivityLog,
+    ChatMessage, ClientNote
 )
 from extensions import mail
 from followupquestions import FOLLOW_UP_QUESTIONS
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, get_jwt, get_jwt_header
 from functools import wraps
 import datetime
-from datetime import timedelta, datetime as dt
+from datetime import datetime as dt, timedelta
 import re
 import random
-import uuid 
+import uuid
+import os
+import shutil
+import base64
 from flask_mail import Message
 
 api_bp = Blueprint('api', __name__)
@@ -193,6 +198,76 @@ def register_admin():
     db.session.commit()
 
     return jsonify(msg="Admin registered successfully"), 201
+
+@api_bp.route('/upload', methods=['POST'])
+@jwt_required()
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({"msg": "No file part"}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"msg": "No selected file"}), 400
+        
+    if file:
+        filename = secure_filename(file.filename)
+        unique_filename = f"{uuid.uuid4().hex}_{filename}"
+        filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], unique_filename)
+        file.save(filepath)
+        
+        file_url = f"/uploads/{unique_filename}" 
+        return jsonify({"url": file_url, "filename": unique_filename}), 201
+
+# --- PUBLIC RESOURCES (HUB) ---
+
+@api_bp.route('/resources', methods=['GET'])
+def get_public_resources():
+    rtype = request.args.get('type')
+    query = Resource.query.filter_by(status='approved')
+    
+    if rtype:
+        query = query.filter_by(type=rtype)
+        
+    resources = query.order_by(Resource.created_at.desc()).all()
+    
+    return jsonify([{
+        "id": r.id,
+        "title": r.title,
+        "description": r.description,
+        "type": r.type,
+        "url": r.url,
+        "content": r.content,
+        "author": r.author.username if r.author else "Zenture Team",
+        "date": r.created_at.strftime("%b %d, %Y")
+    } for r in resources]), 200
+
+# --- ADMIN RESOURCE MANAGEMENT ---
+
+@api_bp.route('/admin/resources', methods=['GET'])
+@jwt_required()
+def get_all_resources_admin():
+    resources = Resource.query.order_by(Resource.status.desc(), Resource.created_at.desc()).all()
+    return jsonify([{
+        "id": r.id,
+        "title": r.title,
+        "type": r.type,
+        "status": r.status,
+        "author": r.author.username if r.author else "System",
+        "date": r.created_at.strftime("%Y-%m-%d")
+    } for r in resources]), 200
+
+@api_bp.route('/admin/resource/<int:resource_id>/status', methods=['PUT'])
+@jwt_required()
+def update_resource_status(resource_id):
+    data = request.get_json()
+    new_status = data.get('status')
+    
+    resource = Resource.query.get(resource_id)
+    if not resource:
+        return jsonify({"msg": "Resource not found"}), 404
+        
+    resource.status = new_status
+    db.session.commit()
+    return jsonify({"msg": f"Resource {new_status}"}), 200
 @api_bp.route('/counsellor/register', methods=['POST'])
 def register_counsellor():
     data = request.get_json()
@@ -277,9 +352,9 @@ def register_start():
     if not email:
         return jsonify(msg="Email is required"), 400
 
-    email_regex = r"^[a-zA-Z0-9._%+-]+@akgec\.ac\.in$"
-    if not re.match(email_regex, email):
-        return jsonify(msg="Please use a valid AKGEC college email ID."), 400
+    # email_regex = r"^[a-zA-Z0-9._%+-]+@akgec\.ac\.in$"
+    # if not re.match(email_regex, email):
+    #     return jsonify(msg="Please use a valid AKGEC college email ID."), 400
     
     otp = str(random.randint(100000, 999999))
     code_hash = bcrypt.generate_password_hash(otp).decode('utf-8')
@@ -311,7 +386,7 @@ def register_verify_and_create():
     if not verification:
         return jsonify(msg="Invalid email or code has expired."), 404
     
-    if dt.datetime.utcnow() > verification.expires_at:
+    if dt.utcnow() > verification.expires_at:
         db.session.delete(verification)
         db.session.commit()
         return jsonify(msg="Verification code has expired."), 400
@@ -534,10 +609,10 @@ def book_appointment():
         student_id=student_id,
         counselor_id=counselor.id,
         appointment_time=appointment_time,
-        status="booked",
+        status="pending",
         notes=description,
         mode=mode, # Save the mode from the frontend
-        meeting_link=meeting_link
+        meeting_link=None # Link generated upon acceptance
     )
     db.session.add(new_appointment)
     student_msg = f"Your appointment with {counselor.username} is confirmed for {appointment_time.strftime('%b %d, %Y at %I:%M %p')}."
@@ -587,6 +662,14 @@ def get_appointments():
         appointments = Appointment.query.filter_by(counselor_id=user_id).all()
     else:
         return jsonify([])
+
+    for a in appointments:
+        if a.status == 'booked' and a.mode != 'in_person' and not a.meeting_link:
+            a.meeting_link = f"/session/{uuid.uuid4()}"
+            db.session.add(a)
+    
+    if appointments:
+        db.session.commit()
 
     return jsonify([{
         "id": a.id,
@@ -670,8 +753,8 @@ def reply_to_post(post_id):
 def get_today_mood_checkin():
     """Checks if the current user has already submitted a mood today."""
     user_id = get_jwt_identity()
-    today_start = dt.datetime.combine(dt.date.today(), dt.time.min)
-    today_end = dt.datetime.combine(dt.date.today(), dt.time.max)
+    today_start = dt.combine(datetime.date.today(), datetime.time.min)
+    today_end = dt.combine(datetime.date.today(), datetime.time.max)
 
     checkin = MoodCheckin.query.filter(
         MoodCheckin.user_id == user_id,
@@ -690,8 +773,8 @@ def add_mood_checkin():
     """Adds a mood check-in for the current user, if one for today doesn't exist."""
     user_id = get_jwt_identity()
     
-    today_start =dt.datetime.combine(dt.date.today(), dt.time.min)
-    today_end = dt.datetime.combine(dt.date.today(), dt.time.max)
+    today_start = dt.combine(datetime.date.today(), datetime.time.min)
+    today_end = dt.combine(datetime.date.today(), datetime.time.max)
     existing_checkin = MoodCheckin.query.filter(
         MoodCheckin.user_id == user_id,
         MoodCheckin.timestamp >= today_start,
@@ -755,6 +838,18 @@ def get_activity_summary():
         "journalEntriesThisWeek": journal_count,
         "assessmentsCompleted": assessment_count
     })
+
+@api_bp.route('/journals', methods=['GET'])
+@jwt_required()
+def get_student_journals():
+    user_id = get_jwt_identity()
+    journals = JournalEntry.query.filter_by(user_id=user_id).order_by(JournalEntry.timestamp.desc()).all()
+    return jsonify([{
+        "id": j.id,
+        "title": j.entry_type.capitalize() if j.entry_type else "Journal Entry", 
+        "date": j.timestamp.isoformat(),
+        "snippet": j.content[:100] + "..." if len(j.content) > 100 else j.content
+    } for j in journals])
 # Add this new endpoint to routes.py for the student dashboard
 # @api_bp.route("/counselor/profile/<int:user_id>", methods=["GET"])
 # @jwt_required()
@@ -811,25 +906,38 @@ def get_counselor_profile(profile_id):
     if not counselor_profile:
         return jsonify({"error": "Counselor not found"}), 404
 
-    # ✅ FIX: This section now correctly queries the database
-    start_of_day = dt.combine(date_obj, dt.min)
-    end_of_day = dt.combine(date_obj, dt.max)
+    # Calculate start and end of the day for the query
+    start_of_day = dt.combine(date_obj, datetime.time.min)
+    end_of_day = dt.combine(date_obj, datetime.time.max)
     
+    # Fetch existing appointments (booked or pending)
     booked_appointments = Appointment.query.filter(
         Appointment.counselor_id == counselor_profile.user_id, 
-        # Querying the correct 'appointment_time' column within a date range
-        Appointment.appointment_time.between(start_of_day, end_of_day)
+        Appointment.appointment_time.between(start_of_day, end_of_day),
+        Appointment.status.in_(['booked', 'pending'])
     ).all()
 
+    # Set of booked times strings
     booked_times = {appt.appointment_time.strftime("%H:%M") for appt in booked_appointments}
-    all_possible_slots = ["10:00", "11:00", "14:00", "15:00", "16:00", "14:30", "15:30", "16:30"]
-    free_slots = [slot for slot in all_possible_slots if slot not in booked_times]
+
+    # Generate 30-minute slots from 09:00 to 18:00
+    slots = []
+    current_time = dt.strptime("09:00", "%H:%M")
+    end_time_limit = dt.strptime("18:00", "%H:%M")
+
+    while current_time <= end_time_limit:
+        time_str = current_time.strftime("%H:%M")
+        slots.append({
+            "time": time_str,
+            "available": time_str not in booked_times
+        })
+        current_time += timedelta(minutes=30)
 
     return jsonify({
         "counselor_id": counselor_profile.user_id,
         "name": counselor_profile.user.username,
         "specialization": counselor_profile.specialization,
-        "available_slots": free_slots
+        "available_slots": slots
     })
 @api_bp.route('/student/dashboard-data', methods=['GET'])
 @roles_required('student')
@@ -841,7 +949,7 @@ def get_student_dashboard_data():
         if not student:
             return jsonify({"msg": "Student not found"}), 404
 
-        now = dt.datetime.utcnow()
+        now = dt.utcnow()
         session_window_start = now - timedelta(minutes=50)
 
         upcoming_appointments_query = (
@@ -856,14 +964,23 @@ def get_student_dashboard_data():
             .all()
         )
         
-        appointments_data = [{
-            'id': appt.id,
-            'counsellorName': counsellor.username,
-            'date': appt.appointment_time.isoformat() + "Z", # <-- FIX: Add "Z" for UTC
-            'mode': appt.mode,
-            'status': appt.status,
-            'meeting_link': appt.meeting_link
-        } for appt, counsellor in upcoming_appointments_query]
+        appointments_data = []
+        for appt, counsellor in upcoming_appointments_query:
+            if appt.status == 'booked' and appt.mode != 'in_person' and not appt.meeting_link:
+                appt.meeting_link = f"/session/{uuid.uuid4()}"
+                db.session.add(appt)
+            
+            appointments_data.append({
+                'id': appt.id,
+                'counsellorName': counsellor.username,
+                'date': appt.appointment_time.isoformat(),
+                'mode': appt.mode,
+                'status': appt.status,
+                'meeting_link': appt.meeting_link
+            })
+        
+        if upcoming_appointments_query:
+            db.session.commit()
         
         dashboard_data = {
             'studentName': student.username,
@@ -900,14 +1017,23 @@ def get_counsellor_dashboard_data():
             .all()
         )
         
-        appointments_data = [{
-            'id': appt.id,
-            'studentName': student.username,
-            'date': appt.appointment_time.isoformat() + "Z", # <-- FIX: Add "Z" for UTC
-            'mode': appt.mode,
-            'status': appt.status,
-            'meeting_link': appt.meeting_link,
-        } for appt, student in appointments_query]
+        appointments_data = []
+        for appt, student in appointments_query:
+            if appt.status == 'booked' and appt.mode != 'in_person' and not appt.meeting_link:
+                appt.meeting_link = f"/session/{uuid.uuid4()}"
+                db.session.add(appt)
+
+            appointments_data.append({
+                'id': appt.id,
+                'studentName': student.username,
+                'date': appt.appointment_time.isoformat(),
+                'mode': appt.mode,
+                'status': appt.status,
+                'meeting_link': appt.meeting_link,
+            })
+        
+        if appointments_query:
+            db.session.commit()
 
         distinct_student_ids = db.session.query(Appointment.student_id)\
             .filter_by(counselor_id=counsellor_id).distinct()
@@ -949,7 +1075,367 @@ def create_counsellor_profile():
         user_id=user_id,
         specialization=specialization
     )
-    db.session.add(new_profile)
+# Add this new endpoint to routes.py for the student dashboard
+# @api_bp.route("/counselor/profile/<int:user_id>", methods=["GET"])
+# @jwt_required()
+# def get_counselor_profile(user_id):
+#     date_str = request.args.get("date")
+#     if not date_str:
+#         return jsonify({"error": "Missing required query parameter: date"}), 400
+
+#     try:
+#         date_obj = dt.strptime(date_str, "%Y-%m-%d").date()
+#     except ValueError:
+#         return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+
+#     counselor = CounselorProfile.query.filter_by(id=user_id).first()
+#     if not counselor:
+#         return jsonify({"error": "Counselor not found"}), 404
+
+#     # Define working hours (dummy slots, you can replace with dynamic logic)
+#     available_slots = ["10:00", "11:00", "14:00", "15:00", "16:00","14:30","15:30","16:30",]
+
+#     # Fetch booked appointments for this counselor on given date
+#     booked = Appointment.query.filter_by(
+#         counselor_id=user_id,
+#         appointment_date=date_obj
+#     ).all()
+
+#     booked_times = [appt.appointment_time.strftime("%H:%M") for appt in booked]
+#     free_slots = [slot for slot in available_slots if slot not in booked_times]
+
+#     return jsonify({
+#         "counselor_id": counselor.user_id,
+#         "name": counselor.user.username,
+#         "specialization": counselor.specialization,
+#         "available_slots": [
+#             {
+#                 "date": date_str,
+#                 "slots": free_slots
+#             }
+#         ]
+#     })
+
+
+
+@api_bp.route('/appointments/<int:appointment_id>/status', methods=['PUT'])
+@roles_required('counselor')
+def update_appointment_status(appointment_id):
+    data = request.json
+    new_status = data.get('status')
+    counselor_id = get_jwt_identity()
+
+    if new_status not in ['booked', 'rejected', 'canceled']:
+        return jsonify({"error": "Invalid status."}), 400
+
+    appointment = Appointment.query.get(appointment_id)
+    if not appointment:
+        return jsonify({"error": "Appointment not found."}), 404
+
+    if appointment.counselor_id != int(counselor_id):
+        return jsonify({"error": "Unauthorized to update this appointment."}), 403
+
+    appointment.status = new_status
+    
+    # Generate meeting link ONLY if accepted (booked) and it's a video call
+    if new_status == 'booked' and appointment.mode == 'video_call' and not appointment.meeting_link:
+        appointment.meeting_link = f"/session/{uuid.uuid4()}"
+        
+        # Notify Student
+        msg = f"Your appointment has been accepted! Join via the video link."
+        notif = Notification(user_id=appointment.student_id, message=msg, link=appointment.meeting_link)
+        db.session.add(notif)
+    elif new_status == 'rejected':
+         msg = f"Your appointment request was declined."
+         notif = Notification(user_id=appointment.student_id, message=msg, link=None)
+         db.session.add(notif)
+
     db.session.commit()
 
-    return jsonify(msg="Counsellor profile created successfully"), 201
+    return jsonify({
+        "message": f"Appointment {new_status} successfully.",
+        "meeting_link": appointment.meeting_link
+    })
+
+@api_bp.route('/session/verify/<string:session_id>', methods=['GET'])
+@jwt_required()
+def verify_session_access(session_id):
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    # Check if a valid appointment exists with this link
+    # The stored link is likely "/session/uuid", so we match that
+    link_path = f"/session/{session_id}"
+    print(f"DEBUG: Verifying session access. UserID: {user_id}, SessionID: {session_id}, LinkPath: {link_path}")
+    
+    appointment = Appointment.query.filter(
+        Appointment.meeting_link == link_path,
+        (Appointment.student_id == user_id) | (Appointment.counselor_id == user_id)
+    ).first()
+    
+    if not appointment:
+        return jsonify({"allowed": False, "error": "Invalid session or unauthorized."}), 403
+    
+    # Time Limit Check
+    now = dt.now()
+    appointment_time = appointment.appointment_time
+    
+    # If appointment_time is string (some DB adapters), parse it. 
+    # SQLAlchemy usually returns datetime object.
+    
+    # Allow joining 10 mins before
+    start_window = appointment_time - timedelta(minutes=10)
+    # Session duration 30 mins (allow up to 30 mins after start)
+    end_window = appointment_time + timedelta(minutes=30)
+    
+    if now < start_window:
+        wait_time = (start_window - now).total_seconds() / 60
+        return jsonify({"allowed": False, "error": f"Session starts in {int(wait_time)} minutes."}), 403
+        
+    if now > end_window:
+         return jsonify({"allowed": False, "error": "Session has expired."}), 403
+         
+    return jsonify({
+        "allowed": True, 
+        "mode": appointment.mode,
+        "startTime": appointment_time.isoformat(),
+        "user": {
+            "id": user.id,
+            "name": user.username,
+            "role": user.role.value
+        }
+    })
+
+# --- COUNSELOR DASHBOARD: CLIENTS ---
+
+@api_bp.route('/counsellor/clients', methods=['GET'])
+@jwt_required()
+def get_counsellor_clients():
+    current_user_id = get_jwt_identity()
+    user = User.query.get(current_user_id)
+    if user.role != UserRole.COUNSELOR:
+        return jsonify({"msg": "Unauthorized"}), 403
+        
+    # Find students who have appointments with this counselor
+    # Use distinct to avoid duplicates
+    stmt = db.session.query(Appointment.student_id).filter_by(counselor_id=current_user_id).distinct()
+    student_ids = [row[0] for row in stmt.all()]
+    
+    clients = []
+    for sid in student_ids:
+        student = User.query.get(sid)
+        if student:
+            # Get latest note
+            latest_note = ClientNote.query.filter_by(counselor_id=current_user_id, student_id=sid).order_by(ClientNote.timestamp.desc()).first()
+            clients.append({
+                "id": student.id,
+                "name": student.username,
+                "email": student.email_hash, # Privacy consideration needed
+                "latest_note": latest_note.note if latest_note else None
+            })
+            
+    return jsonify(clients), 200
+
+@api_bp.route('/counsellor/client/<int:student_id>/note', methods=['POST'])
+@jwt_required()
+def add_client_note(student_id):
+    current_user_id = get_jwt_identity()
+    data = request.get_json()
+    note_content = data.get('note')
+    
+    if not note_content:
+        return jsonify({"msg": "Note content required"}), 400
+        
+    note = ClientNote(counselor_id=current_user_id, student_id=student_id, note=note_content)
+    db.session.add(note)
+    db.session.commit()
+    
+    return jsonify({"msg": "Note added successfully"}), 201
+
+@api_bp.route('/counsellor/client/<int:student_id>', methods=['GET'])
+@jwt_required()
+def get_client_details(student_id):
+    current_user_id = get_jwt_identity()
+    student = User.query.get(student_id)
+    if not student:
+        return jsonify({"msg": "Student not found"}), 404
+        
+    notes = ClientNote.query.filter_by(counselor_id=current_user_id, student_id=student_id).order_by(ClientNote.timestamp.desc()).all()
+    appointments = Appointment.query.filter_by(counselor_id=current_user_id, student_id=student_id).order_by(Appointment.appointment_time.desc()).all()
+    
+    return jsonify({
+        "student": {
+            "id": student.id,
+            "name": student.username,
+            "email": student.email_hash
+        },
+        "notes": [{"id": n.id, "content": n.note, "timestamp": n.timestamp.isoformat()} for n in notes],
+        "appointments": [{"id": a.id, "date": a.appointment_time.isoformat(), "status": a.status, "mode": a.mode} for a in appointments]
+    }), 200
+
+# --- MESSAGING SYSTEM ---
+
+@api_bp.route('/messages/conversations', methods=['GET'])
+@jwt_required()
+def get_conversations():
+    current_user_id = get_jwt_identity()
+    
+    # Get distinct users communicated with
+    sent_to = db.session.query(ChatMessage.receiver_id).filter_by(sender_id=current_user_id)
+    received_from = db.session.query(ChatMessage.sender_id).filter_by(receiver_id=current_user_id)
+    
+    contact_ids = set([r[0] for r in sent_to.all()] + [r[0] for r in received_from.all()])
+    
+    conversations = []
+    for uid in contact_ids:
+        contact = User.query.get(uid)
+        if contact:
+            # Get last message
+            last_msg = ChatMessage.query.filter(
+                ((ChatMessage.sender_id == current_user_id) & (ChatMessage.receiver_id == uid)) |
+                ((ChatMessage.sender_id == uid) & (ChatMessage.receiver_id == current_user_id))
+            ).order_by(ChatMessage.timestamp.desc()).first()
+            
+            unread_count = ChatMessage.query.filter_by(sender_id=uid, receiver_id=current_user_id, is_read=False).count()
+            
+            conversations.append({
+                "user": {"id": contact.id, "name": contact.username, "role": contact.role.value},
+                "last_message": last_msg.content[:50] + "..." if last_msg else "",
+                "timestamp": last_msg.timestamp.isoformat() if last_msg else None,
+                "unread": unread_count
+            })
+            
+    # Sort by timestamp desc
+    conversations.sort(key=lambda x: x['timestamp'] or "", reverse=True)
+    return jsonify(conversations), 200
+
+@api_bp.route('/messages/<int:user_id>', methods=['GET'])
+@jwt_required()
+def get_messages(user_id):
+    current_user_id = get_jwt_identity()
+    
+    messages = ChatMessage.query.filter(
+        ((ChatMessage.sender_id == current_user_id) & (ChatMessage.receiver_id == user_id)) |
+        ((ChatMessage.sender_id == user_id) & (ChatMessage.receiver_id == current_user_id))
+    ).order_by(ChatMessage.timestamp.asc()).all()
+    
+    return jsonify([
+        {
+            "id": m.id,
+            "sender_id": m.sender_id,
+            "receiver_id": m.receiver_id,
+            "content": m.content,
+            "timestamp": m.timestamp.isoformat(),
+            "is_read": m.is_read
+        } for m in messages
+    ]), 200
+
+@api_bp.route('/messages', methods=['POST'])
+@jwt_required()
+def send_message():
+    current_user_id = get_jwt_identity()
+    data = request.get_json()
+    receiver_id = data.get('receiver_id')
+    content = data.get('content')
+    
+    if not receiver_id or not content:
+        return jsonify({"msg": "Receiver and content required"}), 400
+        
+    msg = ChatMessage(sender_id=current_user_id, receiver_id=receiver_id, content=content)
+    db.session.add(msg)
+    
+    # Create Notification
+    sender = User.query.get(current_user_id)
+    notif = Notification(
+        user_id=receiver_id,
+        message=f"New message from {sender.username}",
+        type="message"
+    )
+    db.session.add(notif)
+    
+    db.session.commit()
+    
+    return jsonify({"msg": "Sent", "id": msg.id, "timestamp": msg.timestamp.isoformat()}), 201
+
+@api_bp.route('/messages/read/<int:sender_id>', methods=['PUT'])
+@jwt_required()
+def mark_messages_read(sender_id):
+    current_user_id = get_jwt_identity()
+    ChatMessage.query.filter_by(sender_id=sender_id, receiver_id=current_user_id, is_read=False)\
+        .update({ChatMessage.is_read: True})
+    db.session.commit()
+    return jsonify({"msg": "Marked read"}), 200
+
+# --- RESOURCES MANAGEMENT ---
+
+@api_bp.route('/counsellor/resources', methods=['GET'])
+@jwt_required()
+def get_counselor_resources():
+    current_user_id = get_jwt_identity()
+    resources = Resource.query.filter_by(author_id=current_user_id).order_by(Resource.created_at.desc()).all()
+    
+    return jsonify([{
+        "id": r.id,
+        "title": r.title,
+        "type": r.type,
+        "status": r.status,
+        "created_at": r.created_at.isoformat() if r.created_at else None
+    } for r in resources]), 200
+
+@api_bp.route('/counsellor/resources', methods=['POST'])
+@jwt_required()
+def create_resource():
+    current_user_id = get_jwt_identity()
+    data = request.get_json()
+    
+    new_res = Resource(
+        title=data.get('title'),
+        description=data.get('description'),
+        type=data.get('type'), # video, audio, article
+        url=data.get('url'),
+        content=data.get('content'),
+        author_id=current_user_id,
+        status='pending'
+    )
+    db.session.add(new_res)
+    db.session.commit()
+    return jsonify({"msg": "Resource submitted for review", "id": new_res.id}), 201
+
+# --- SETTINGS / PROFILE ---
+
+@api_bp.route('/counsellor/settings', methods=['GET'])
+@jwt_required()
+def get_cownsellor_settings():
+    current_user_id = get_jwt_identity()
+    profile = CounselorProfile.query.filter_by(user_id=current_user_id).first()
+    user = User.query.get(current_user_id)
+    
+    if not profile:
+        profile = CounselorProfile(user_id=current_user_id)
+        db.session.add(profile)
+        db.session.commit()
+        
+    return jsonify({
+        "username": user.username,
+        "specialization": profile.specialization,
+        "availability": profile.availability
+    }), 200
+
+@api_bp.route('/counsellor/settings', methods=['PUT'])
+@jwt_required()
+def update_counselor_settings():
+    current_user_id = get_jwt_identity()
+    data = request.get_json()
+    
+    profile = CounselorProfile.query.filter_by(user_id=current_user_id).first()
+    if not profile:
+        profile = CounselorProfile(user_id=current_user_id)
+        db.session.add(profile)
+        
+    if 'specialization' in data:
+        profile.specialization = data['specialization']
+    if 'availability' in data:
+        profile.availability = data['availability']
+        
+    db.session.commit()
+    return jsonify({"msg": "Settings updated"}), 200
