@@ -16,3 +16,4 @@ torch
 datasets
 scikit-learn
 numpy
+eventlet
