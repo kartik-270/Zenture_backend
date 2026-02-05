@@ -26,22 +26,35 @@ from flask_mail import Message
 api_bp = Blueprint('api', __name__)
 CORS(api_bp, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True) # Enable CORS for all routes in this blueprint
 
-try:
-    LISTENER_PIPE = pipeline("text-classification", model="./listener_model", tokenizer="./listener_model")
-    RESPONDER_PIPE = pipeline("text-generation", model="./responder_model", tokenizer="./responder_model")
-    CHATBOT_MODELS_LOADED = True
-    print("Chatbot models loaded successfully.")
-except Exception as e:
-    LISTENER_PIPE = None
-    RESPONDER_PIPE = None
-    CHATBOT_MODELS_LOADED = False
-    print(f"Failed to load chatbot models: {e}")
+# Lazy Loading Globals
+LISTENER_PIPE = None
+RESPONDER_PIPE = None
+CHATBOT_MODELS_LOADED = False
+
+def get_chatbot_models():
+    global LISTENER_PIPE, RESPONDER_PIPE, CHATBOT_MODELS_LOADED
+    if CHATBOT_MODELS_LOADED:
+        return LISTENER_PIPE, RESPONDER_PIPE
+    
+    try:
+        print("Loading chatbot models... (Lazy Load)")
+        LISTENER_PIPE = pipeline("text-classification", model="./listener_model", tokenizer="./listener_model")
+        RESPONDER_PIPE = pipeline("text-generation", model="./responder_model", tokenizer="./responder_model")
+        CHATBOT_MODELS_LOADED = True
+        print("Chatbot models loaded successfully.")
+        return LISTENER_PIPE, RESPONDER_PIPE
+    except Exception as e:
+        print(f"Failed to load chatbot models: {e}")
+        return None, None
 
 CRISIS_RESPONSE = "I'm so sorry you're going through this. Please know that help is available. You can connect with someone immediately by calling 988 in the US or finding a local crisis hotline. Your life is important, and support is available."
 
 @api_bp.route('/chatbot', methods=['POST'])
 def chatbot_endpoint():
-    if not CHATBOT_MODELS_LOADED:
+    # Trigger lazy load
+    listener, responder = get_chatbot_models()
+    
+    if not listener or not responder:
         return jsonify(response="The chatbot models are not available. Please contact support.", followUps=[]), 503
 
     user_id = None
@@ -61,7 +74,7 @@ def chatbot_endpoint():
 
     # Step 1: Listener Model to classify user input
     try:
-        analysis_result = LISTENER_PIPE(user_input)[0]
+        analysis_result = listener(user_input)[0]
         predicted_label = analysis_result['label']
         confidence_score = analysis_result['score']
     except Exception as e:
@@ -103,13 +116,13 @@ def chatbot_endpoint():
     try:
         full_prompt = f"The user's condition is {predicted_label}. {prompt_history} <user> {user_input} Bot: "
         
-        response = RESPONDER_PIPE(
+        response = responder(
             full_prompt, 
             max_length=100, 
             do_sample=True, 
             top_k=50, 
             top_p=0.95,
-            pad_token_id=RESPONDER_PIPE.tokenizer.eos_token_id
+            pad_token_id=responder.tokenizer.eos_token_id
         )
         
         generated_text = response[0]['generated_text']
