@@ -1,6 +1,5 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_cors import CORS
-from transformers import pipeline
 import re
 import os 
 from werkzeug.utils import secure_filename
@@ -27,6 +26,8 @@ api_bp = Blueprint('api', __name__)
 CORS(api_bp, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True) # Enable CORS for all routes in this blueprint
 
 try:
+    print("Loading chatbot models... (Lazy Load)")
+    from transformers import pipeline
     LISTENER_PIPE = pipeline("text-classification", model="./listener_model", tokenizer="./listener_model")
     RESPONDER_PIPE = pipeline("text-generation", model="./responder_model", tokenizer="./responder_model")
     CHATBOT_MODELS_LOADED = True
