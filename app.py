@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()
+
 from flask import Flask, send_from_directory
 from flask_cors import CORS
 
@@ -21,7 +24,7 @@ def create_app():
     mail.init_app(app)
     CORS(app)  
 
-    socketio.init_app(app, cors_allowed_origins="*")
+    socketio.init_app(app, cors_allowed_origins="*", async_mode='eventlet')
 
     app.register_blueprint(api_bp, url_prefix='/api')
 
