@@ -1,6 +1,3 @@
-import eventlet
-eventlet.monkey_patch()
-
 from flask import Flask, send_from_directory
 from flask_cors import CORS
 
@@ -11,8 +8,7 @@ from routes import api_bp
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import os
 
-socketio = SocketIO(cors_allowed_origins="*", async_mode="eventlet")
-
+socketio = SocketIO()
 
 def create_app():
     app = Flask(__name__)
