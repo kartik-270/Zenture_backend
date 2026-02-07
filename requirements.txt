@@ -12,7 +12,7 @@ Flask-SocketIO
 Flask-APScheduler
 transformers
 agora-token-builder
-torch
+torch --index-url https://download.pytorch.org/whl/cpu
 datasets
 scikit-learn
 numpy

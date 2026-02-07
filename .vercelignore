@@ -1,0 +1,13 @@
+model/results_listener/
+model/results_responder/
+listener_model/
+responder_model/
+venv/
+.venv/
+__pycache__/
+*.db
+*.sqlite3
+.git
+.gitignore
+instance/
+migrations/
