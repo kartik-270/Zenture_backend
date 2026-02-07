@@ -2,6 +2,10 @@ model/results_listener/
 model/results_responder/
 listener_model/
 responder_model/
+./model/results_listener/
+./model/results_responder/
+*/results_listener/
+*/results_responder/
 venv/
 .venv/
 __pycache__/
