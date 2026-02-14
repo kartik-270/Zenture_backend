@@ -52,16 +52,32 @@ def test_email_config():
         "MAIL_PASSWORD": "Set" if current_app.config.get('MAIL_PASSWORD') else "Not Set",
     }
     
-    try:
-        subject = "Zenture Email Test"
-        msg = Message(subject, recipients=[current_app.config.get('MAIL_USERNAME')])
-        msg.body = "This is a diagnostic email from Zenture Wellness."
-        mail.send(msg)
+    # If ?check_only=true is passed, stop here to avoid hanging
+    if request.args.get('check_only'):
         return jsonify({
-            "status": "success",
-            "message": "Test email sent successfully!",
+            "status": "config_check",
             "config": config_info
         }), 200
+    
+    import eventlet
+    try:
+        # Use eventlet to timeout the whole sending process if it takes > 10s
+        with eventlet.Timeout(10):
+            subject = "Zenture Email Test"
+            msg = Message(subject, recipients=[current_app.config.get('MAIL_USERNAME')])
+            msg.body = "This is a diagnostic email from Zenture Wellness."
+            mail.send(msg)
+            return jsonify({
+                "status": "success",
+                "message": "Test email sent successfully!",
+                "config": config_info
+            }), 200
+    except eventlet.timeout.Timeout:
+        return jsonify({
+            "status": "error",
+            "message": "The email sending process timed out (10s delay limit hit).",
+            "config": config_info
+        }), 504
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
