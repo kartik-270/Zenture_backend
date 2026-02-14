@@ -40,6 +40,40 @@ except Exception as e:
 
 CRISIS_RESPONSE = "I'm so sorry you're going through this. Please know that help is available. You can connect with someone immediately by calling 988 in the US or finding a local crisis hotline. Your life is important, and support is available."
 
+@api_bp.route('/test-email', methods=['GET'])
+def test_email_config():
+    """Diagnostic endpoint to check email configuration and connectivity."""
+    config_info = {
+        "MAIL_SERVER": current_app.config.get('MAIL_SERVER'),
+        "MAIL_PORT": current_app.config.get('MAIL_PORT'),
+        "MAIL_USE_TLS": current_app.config.get('MAIL_USE_TLS'),
+        "MAIL_USE_SSL": current_app.config.get('MAIL_USE_SSL'),
+        "MAIL_USERNAME": "Set" if current_app.config.get('MAIL_USERNAME') else "Not Set",
+        "MAIL_PASSWORD": "Set" if current_app.config.get('MAIL_PASSWORD') else "Not Set",
+    }
+    
+    try:
+        subject = "Zenture Email Test"
+        msg = Message(subject, recipients=[current_app.config.get('MAIL_USERNAME')])
+        msg.body = "This is a diagnostic email from Zenture Wellness."
+        mail.send(msg)
+        return jsonify({
+            "status": "success",
+            "message": "Test email sent successfully!",
+            "config": config_info
+        }), 200
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"DIAGNOSTIC EMAIL ERROR: {error_details}")
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "config": config_info,
+            "trace": error_details
+        }), 500
+
+
 @api_bp.route('/chatbot', methods=['POST'])
 def chatbot_endpoint():
     if not CHATBOT_MODELS_LOADED:
