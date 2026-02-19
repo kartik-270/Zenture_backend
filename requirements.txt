@@ -1,4 +1,3 @@
---extra-index-url https://download.pytorch.org/whl/cpu
 Flask
 Flask-SQLAlchemy
 Flask-Migrate
@@ -18,3 +17,5 @@ datasets
 scikit-learn
 numpy
 eventlet
+accelerate
+resend

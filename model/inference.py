@@ -2,10 +2,22 @@
 from transformers import pipeline
 
 # Load the trained listener model using the pipeline
+# Ensure paths are correct relative to the 'sih' directory
 listener_pipe = pipeline("text-classification", model="./listener_model", tokenizer="./listener_model")
 
-# Load the trained responder model
-responder_pipe = pipeline("text-generation", model="./responder_model", tokenizer="./responder_model")
+# Load the trained responder model (LoRA)
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+base_model_name = "microsoft/DialoGPT-medium"
+print("Loading base model...")
+base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
+print("Loading LoRA adapters...")
+model = PeftModel.from_pretrained(base_model, "./responder_model")
+tokenizer = AutoTokenizer.from_pretrained("./responder_model")
+
+responder_pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
 
 def chatbot_response(user_input):
     # Module 1: Analyze user input

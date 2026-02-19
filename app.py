@@ -32,6 +32,9 @@ def create_app():
     @app.route('/')
     def index():
         return "Welcome to the Mental Health Platform API!"
+        
+    # Ensure tables exist
+    
 
     return app
 

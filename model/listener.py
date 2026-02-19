@@ -68,7 +68,6 @@ training_args = TrainingArguments(
     warmup_steps=500,
     weight_decay=0.01,
     eval_strategy="epoch",  
-    logging_dir='./logs_listener',
     logging_steps=10,
 )
 
@@ -78,7 +77,7 @@ trainer = Trainer(
     args=training_args,
     train_dataset=tokenized_datasets["train"],
     eval_dataset=tokenized_datasets["validation"],
-    tokenizer=tokenizer,
+    processing_class=tokenizer,
     compute_metrics=compute_metrics,
 )
 

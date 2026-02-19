@@ -27,6 +27,9 @@ class Config:
     MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
     MAIL_DEFAULT_SENDER = os.environ.get('MAIL_DEFAULT_SENDER', MAIL_USERNAME)
     
+    # Resend configuration
+    RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
+    
     # Session Management
     from datetime import timedelta
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)

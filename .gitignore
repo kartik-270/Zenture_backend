@@ -5,6 +5,8 @@ __pycache__/
 
 # Virtual environment
 venv/
+venv_gpu/
+testmodel/
 ENV/
 env/
 .venv/
@@ -25,6 +27,7 @@ migrations/__pycache__/
 # System files
 .DS_Store
 Thumbs.db
+uploads/
 
 # Machine Learning Artifacts
 results_listener/

@@ -61,12 +61,35 @@ class UserActivityLog(db.Model):
 class ChatHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    user_message = db.Column(db.Text, nullable=False)
-    bot_response = db.Column(db.Text, nullable=False)
-    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     conversation_id = db.Column(db.String(36), nullable=False, index=True)
+    sender = db.Column(db.String(10), nullable=False) # 'user' or 'bot'
+    message = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    
+    # Analytics Fields
+    intent = db.Column(db.String(100), nullable=True)
+    emotion = db.Column(db.String(50), nullable=True)
+    sentiment_score = db.Column(db.Float, nullable=True)
+    is_crisis = db.Column(db.Boolean, default=False)
 
     user = db.relationship('User', backref=db.backref('chat_history', lazy=True))
+
+class ChatSession(db.Model):
+    __tablename__ = 'chat_session'
+    id = db.Column(db.Integer, primary_key=True)
+    conversation_id = db.Column(db.String(36), unique=True, nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    start_time = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    end_time = db.Column(db.DateTime, nullable=True)
+    is_completed = db.Column(db.Boolean, default=False)
+    
+    # Impact Metrics
+    feedback_score = db.Column(db.Integer, nullable=True) # e.g., 1 for positive, 0 for negative
+    feedback_text = db.Column(db.Text, nullable=True)
+    primary_emotion = db.Column(db.String(50), nullable=True)
+    
+    user = db.relationship('User', backref=db.backref('chat_sessions', lazy=True))
+
 
 class ConfidentialData(db.Model):
     id = db.Column(db.Integer, primary_key=True)

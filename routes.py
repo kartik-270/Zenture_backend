@@ -1,12 +1,13 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_cors import CORS
+from sqlalchemy import func
 import re
 import os 
 from werkzeug.utils import secure_filename
 from models import (
     db, User, UserRole, VerificationCode, ConfidentialData, 
     Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin, JournalEntry,Notification, UserActivityLog,
-    ChatMessage, ClientNote
+    ChatMessage, ClientNote, ChatSession
 )
 from extensions import mail
 from followupquestions import FOLLOW_UP_QUESTIONS
@@ -21,20 +22,41 @@ import os
 import shutil
 import base64
 from flask_mail import Message
+import resend
 
 api_bp = Blueprint('api', __name__)
 CORS(api_bp, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True) # Enable CORS for all routes in this blueprint
 
 try:
     print("Loading chatbot models... (Lazy Load)")
-    from transformers import pipeline
+    from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+    import torch
+
+    # Load Listener
     LISTENER_PIPE = pipeline("text-classification", model="./listener_model", tokenizer="./listener_model")
-    RESPONDER_PIPE = pipeline("text-generation", model="./responder_model", tokenizer="./responder_model")
+    
+    # Load Responder (LoRA)
+    print("Loading base responder model...")
+    base_model_name = "microsoft/DialoGPT-medium"
+    base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
+    print("Loading LoRA adapters...")
+    model = PeftModel.from_pretrained(base_model, "./responder_model")
+    tokenizer = AutoTokenizer.from_pretrained("./responder_model")
+    RESPONDER_PIPE = pipeline("text-generation", model=model, tokenizer=tokenizer)
+    
+    # Emotion classification model for analytics
+    EMOTION_PIPE = pipeline("text-classification", model="bhadresh-savani/bert-base-uncased-emotion", return_all_scores=True)
+    # Sentiment analysis model
+    SENTIMENT_PIPE = pipeline("text-classification", model="distilbert-base-uncased-finetuned-sst-2-english")
+    
     CHATBOT_MODELS_LOADED = True
     print("Chatbot models loaded successfully.")
 except Exception as e:
     LISTENER_PIPE = None
     RESPONDER_PIPE = None
+    EMOTION_PIPE = None
+    SENTIMENT_PIPE = None
     CHATBOT_MODELS_LOADED = False
     print(f"Failed to load chatbot models: {e}")
 
@@ -48,47 +70,53 @@ def test_email_config():
         "MAIL_PORT": current_app.config.get('MAIL_PORT'),
         "MAIL_USE_TLS": current_app.config.get('MAIL_USE_TLS'),
         "MAIL_USE_SSL": current_app.config.get('MAIL_USE_SSL'),
-        "MAIL_USERNAME": "Set" if current_app.config.get('MAIL_USERNAME') else "Not Set",
-        "MAIL_PASSWORD": "Set" if current_app.config.get('MAIL_PASSWORD') else "Not Set",
+        "RESEND_KEY_SET": bool(current_app.config.get('RESEND_API_KEY')),
     }
     
-    # If ?check_only=true is passed, stop here to avoid hanging
-    if request.args.get('check_only'):
-        return jsonify({
-            "status": "config_check",
-            "config": config_info
-        }), 200
-    
+    # Check if we should use Resend (for production)
+    if current_app.config.get('RESEND_API_KEY'):
+        try:
+            resend.api_key = current_app.config.get('RESEND_API_KEY')
+            params = {
+                "from": "Zenture <onboarding@resend.dev>",
+                "to": current_app.config.get('MAIL_USERNAME') or "recipient@example.com",
+                "subject": "Zenture Email Diagnostic (Resend)",
+                "text": "This email was sent via the Resend HTTP API to bypass SMTP blocks."
+            }
+            resend.Emails.send(params)
+            return jsonify({"status": "success", "method": "Resend API", "config": config_info}), 200
+        except Exception as e:
+            return jsonify({"status": "error", "method": "Resend API", "error": str(e), "config": config_info}), 500
+
+    # Fallback to SMTP (for local)
     import eventlet
     try:
-        # Use eventlet to timeout the whole sending process if it takes > 10s
         with eventlet.Timeout(10):
-            subject = "Zenture Email Test"
+            subject = "Zenture Email Diagnostic (SMTP)"
             msg = Message(subject, recipients=[current_app.config.get('MAIL_USERNAME')])
-            msg.body = "This is a diagnostic email from Zenture Wellness."
+            msg.body = "This email was sent via the standard SMTP fallback."
             mail.send(msg)
-            return jsonify({
-                "status": "success",
-                "message": "Test email sent successfully!",
-                "config": config_info
-            }), 200
-    except eventlet.timeout.Timeout:
-        return jsonify({
-            "status": "error",
-            "message": "The email sending process timed out (10s delay limit hit).",
-            "config": config_info
-        }), 504
+            return jsonify({"status": "success", "method": "SMTP", "config": config_info}), 200
     except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        print(f"DIAGNOSTIC EMAIL ERROR: {error_details}")
-        return jsonify({
-            "status": "error",
-            "message": str(e),
-            "config": config_info,
-            "trace": error_details
-        }), 500
+        return jsonify({"status": "error", "method": "SMTP", "error": str(e), "config": config_info}), 500
 
+def send_with_resend(to_email, subject, body_text):
+    """Helper to send email via Resend API."""
+    try:
+        if not current_app.config.get('RESEND_API_KEY'):
+            return False
+        resend.api_key = current_app.config.get('RESEND_API_KEY')
+        params = {
+            "from": "Zenture <onboarding@resend.dev>",
+            "to": to_email,
+            "subject": subject,
+            "text": body_text,
+        }
+        resend.Emails.send(params)
+        return True
+    except Exception as e:
+        print(f"Resend error: {e}")
+        return False
 
 @api_bp.route('/chatbot', methods=['POST'])
 def chatbot_endpoint():
@@ -102,15 +130,49 @@ def chatbot_endpoint():
     except Exception as e:
         pass
 
-    data = request.get_json()
+    data = request.get_json() or {}
     user_input = data.get('message', '')
-    # Get the conversation ID from the frontend; generate a new one if it's the first message
-    conversation_id = data.get('conversation_id', str(uuid.uuid4()))
+    # Ensure conversation_id is never None. If missing or None, generate new UUID.
+    conversation_id = data.get('conversation_id') or str(uuid.uuid4())
 
     if not user_input:
         return jsonify(response="Please provide a message.", followUps=[], conversation_id=conversation_id), 400
 
-    # Step 1: Listener Model to classify user input
+    # Analytics: Emotion & Sentiment Detection
+    emotion_label = 'neutral'
+    sentiment_score = 0.0
+    try:
+        if EMOTION_PIPE:
+            # Note: return_all_scores=True returns [[{'label': 'sadness', 'score': 0.9}, ...]]
+            # But sometimes it might behave differently.
+            raw_emotions = EMOTION_PIPE(user_input)
+            if isinstance(raw_emotions[0], list):
+                emotions = raw_emotions[0]
+            else:
+                emotions = raw_emotions
+            
+            emotion_label = max(emotions, key=lambda x: x['score'])['label']
+        
+        if SENTIMENT_PIPE:
+            sentiment_res = SENTIMENT_PIPE(user_input)[0]
+            # Convert 'POSITIVE'/'NEGATIVE' to score
+            sentiment_score = 1.0 if sentiment_res['label'] == 'POSITIVE' else 0.0
+    except Exception as e:
+        print(f"Analytics model error: {e}")
+
+    # Track or Start Session
+    try:
+        session = ChatSession.query.filter_by(conversation_id=conversation_id).first()
+        if not session:
+            # Create new session if it doesn't exist
+            session = ChatSession(conversation_id=conversation_id, user_id=user_id)
+            db.session.add(session)
+            db.session.commit()
+    except Exception as e:
+        print(f"Session tracking error: {e}")
+        db.session.rollback()
+
+    # Step 1: Listener Model to classify mental health condition
     try:
         analysis_result = LISTENER_PIPE(user_input)[0]
         predicted_label = analysis_result['label']
@@ -119,26 +181,32 @@ def chatbot_endpoint():
         print(f"Listener model error: {e}")
         return jsonify(response="I'm having trouble understanding that right now. Could you please rephrase?", followUps=[], conversation_id=conversation_id), 500
 
-    # Step 2: Triage based on the Listener Model's prediction
-    if predicted_label == "Suicidal" and confidence_score > 0.8:
+    # Risk Detection
+    is_crisis = predicted_label == "Suicidal" and confidence_score > 0.8
+    if is_crisis:
+        # ... (crisis handling remains same) ...
         bot_response = CRISIS_RESPONSE
         if user_id:
             try:
-                # Save both user and bot messages with the same conversation ID
-                user_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='user', message=user_input)
+                user_entry = ChatHistory(
+                    user_id=user_id, conversation_id=conversation_id, sender='user', 
+                    message=user_input, emotion=emotion_label, sentiment_score=sentiment_score,
+                    intent=predicted_label, is_crisis=is_crisis
+                )
                 bot_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='bot', message=bot_response)
                 db.session.add(user_entry)
                 db.session.add(bot_entry)
                 db.session.commit()
             except Exception as e:
                 db.session.rollback()
-                print(f"Failed to save chat history: {e}")
+                print(f"Failed to save crisis chat history: {e}")
         return jsonify(response=bot_response, followUps=[], conversation_id=conversation_id), 200
 
-    # Step 3: Get follow-up questions for the predicted label
-    follow_ups = FOLLOW_UP_QUESTIONS.get(predicted_label, ["How can I help you today?"])
+    # Step 3: Get follow-up questions
+    all_follow_ups = FOLLOW_UP_QUESTIONS.get(predicted_label, ["How can I help you today?"])
+    follow_ups = random.sample(all_follow_ups, min(len(all_follow_ups), 2))
     
-    # Step 4: Retrieve conversation history from the database (for logged-in users)
+    # Step 4: Retrieve conversation history
     prompt_history = ""
     if user_id:
         conversation_history = ChatHistory.query.filter_by(
@@ -146,35 +214,104 @@ def chatbot_endpoint():
             conversation_id=conversation_id
         ).order_by(ChatHistory.timestamp.asc()).all()
         
-        # Format the history for the responder model
-        for turn in conversation_history:
-            prompt_history += f"<{turn.sender}> {turn.message} "
+        # Limit history to lookback_window
+        lookback_window = 6 # Reduce context window to keep prompt clean
+        for turn in conversation_history[-lookback_window:]:
+             prompt_history += f"<{turn.sender}> {turn.message} "
 
-    # Step 5: Generate a response using the full prompt
+    # Step 5: Generate a response
+    # Step 5: Generate a response
     try:
-        full_prompt = f"The user's condition is {predicted_label}. {prompt_history} <user> {user_input} Bot: "
+        # Contextualize prompt with sentiment
+        if sentiment_score < 0.3:
+            tone_instruction = "(Be empathetic and supportive)"
+        elif sentiment_score > 0.7:
+            tone_instruction = "(Be encouraging and positive)"
+        else:
+            tone_instruction = "(Be warm and professional)"
+            
+        # DialoGPT works best with a chat-like structure. 
+        # We inject few-shot examples to show the model how to behave.
+        few_shot_examples = (
+            "User: I'm feeling really down today.\n"
+            "Counselor: I'm sorry to hear that. I'm here to listen. What's been on your mind?\n"
+            "User: I'm having a panic attack.\n"
+            "Counselor: Take a deep breath with me. Breathe in... and out. You are safe. I'm here.\n"
+            "User: I hate myself.\n"
+            "Counselor: It sounds like you're in a lot of pain right now. You deserve support and kindness.\n"
+        )
         
+        full_prompt = (
+            f"Instruction: You are a compassionate mental health counselor. {tone_instruction}\n"
+            f"{few_shot_examples}\n"
+            f"User's status: {predicted_label}.\n"
+            f"{prompt_history}"
+            f"User: {user_input}\n"
+            f"Counselor:"
+        )
+        print(f"DEBUG PROMPT: {full_prompt}")
+        
+        # Generation call
         response = RESPONDER_PIPE(
             full_prompt, 
-            max_length=100, 
+            max_new_tokens=60, 
             do_sample=True, 
             top_k=50, 
-            top_p=0.95,
-            pad_token_id=RESPONDER_PIPE.tokenizer.eos_token_id
+            top_p=0.9,
+            temperature=0.7,
+            repetition_penalty=1.2,
+            pad_token_id=RESPONDER_PIPE.tokenizer.eos_token_id,
+            eos_token_id=RESPONDER_PIPE.tokenizer.eos_token_id,
+            max_length=None
         )
         
         generated_text = response[0]['generated_text']
-        bot_response = generated_text.split("Bot: ")[-1].strip()
+        print(f"DEBUG RAW RESPONSE: {generated_text}")
+        
+        # Robust extraction
+        if "Counselor:" in generated_text:
+            # We want the LAST Counselor response, in case the model regenerated the examples
+            parts = generated_text.split("Counselor:")
+            bot_response_full = parts[-1].strip()
+        elif "Bot:" in generated_text: 
+             bot_response_full = generated_text.split("Bot:")[-1].strip()
+        else:
+            # Fallback: try to find where the prompt ended
+            # approximate by checking if prompt is a prefix
+            if generated_text.startswith(full_prompt):
+                 bot_response_full = generated_text[len(full_prompt):].strip()
+            else:
+                 bot_response_full = generated_text.strip()
+        
+        # Aggressive cleaning of hallucinations
+        # usage of <usr>, <sys> indicates model training artifacts leaking
+        stop_markers = [
+            "User:", "User :", "System:", "Intent:", 
+            "<user>", "<bot>", "<usr>", "<sys>", 
+            "\n", "Counselor:"
+        ]
+        for marker in stop_markers:
+            if marker in bot_response_full:
+                bot_response_full = bot_response_full.split(marker)[0].strip()
+        
+        # Fallback for empty or bad responses
+        if not bot_response_full or len(bot_response_full) < 2:
+             bot_response_full = "I'm here for you. I'm listening."
+                
+        bot_response = bot_response_full
         
     except Exception as e:
         print(f"Responder model error: {e}")
         return jsonify(response="I'm not able to generate a response right now. Please try again later.", followUps=[], conversation_id=conversation_id), 500
 
-    # Step 6: Save chat history for logged-in users
+    # Step 6: Save chat history
     if user_id:
         try:
-            # Save both the user and bot message with the same conversation ID
-            user_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='user', message=user_input)
+            user_entry = ChatHistory(
+                user_id=user_id, conversation_id=conversation_id, sender='user', 
+                message=user_input, emotion=emotion_label, sentiment_score=sentiment_score,
+                intent=predicted_label, is_crisis=is_crisis
+            )
             bot_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='bot', message=bot_response)
             db.session.add(user_entry)
             db.session.add(bot_entry)
@@ -183,24 +320,75 @@ def chatbot_endpoint():
             db.session.rollback()
             print(f"Failed to save chat history: {e}")
 
-    # Return the response, follow-up questions, and the conversation ID
     return jsonify(response=bot_response, followUps=follow_ups, conversation_id=conversation_id), 200
 
+@api_bp.route('/chatbot/feedback', methods=['POST'])
+@jwt_required()
+def save_chatbot_feedback():
+    data = request.get_json()
+    conversation_id = data.get('conversation_id')
+    score = data.get('score')
+    text = data.get('text')
+    
+    if not conversation_id:
+        return jsonify(msg="Conversation ID is required"), 400
+        
+    session = ChatSession.query.filter_by(conversation_id=conversation_id).first()
+    if not session:
+        return jsonify(msg="Session not found"), 404
+        
+    session.feedback_score = score
+    session.feedback_text = text
+    db.session.commit()
+    return jsonify(msg="Feedback saved successfully"), 200
+
+@api_bp.route('/chatbot/session/end', methods=['POST'])
+@jwt_required()
+def end_chatbot_session():
+    data = request.get_json()
+    conversation_id = data.get('conversation_id')
+    
+    if not conversation_id:
+        return jsonify(msg="Conversation ID is required"), 400
+        
+    session = ChatSession.query.filter_by(conversation_id=conversation_id).first()
+    if not session:
+        return jsonify(msg="Session not found"), 404
+        
+    session.end_time = datetime.datetime.utcnow()
+    session.is_completed = True
+    
+    # Calculate primary emotion for the session
+    history = ChatHistory.query.filter_by(conversation_id=conversation_id, sender='user').all()
+    if history:
+        emotions = [h.emotion for h in history if h.emotion]
+        if emotions:
+            session.primary_emotion = max(set(emotions), key=emotions.count)
+            
+    db.session.commit()
+    return jsonify(msg="Session ended successfully"), 200
 def send_username_email(email, username):
-    try:
-        subject = "Your Username for Mental Health Platform"
-        msg = Message(subject, recipients=[email])
-        msg.body = f"""
+    """Sends username via Resend API (production) or SMTP (local fallback)."""
+    subject = "Your Username for Mental Health Platform"
+    body = f"""
 Hello,
 
 You requested your username. Your username is: {username}
 
 If you did not request this, please ignore this email.
 """
+    # 1. Try Resend First (Production)
+    if send_with_resend(email, subject, body):
+        return True
+        
+    # 2. Fallback to SMTP (Local)
+    try:
+        msg = Message(subject, recipients=[email])
+        msg.body = body
         mail.send(msg)
         return True
     except Exception as e:
-        print(f"Error sending email: {e}")
+        print(f"Error sending email via SMTP: {e}")
         return False
 
 @api_bp.route('/forgot-username', methods=['POST'])
@@ -228,7 +416,112 @@ def forgot_username():
     
     return jsonify(msg="If an account with that email exists, the username has been sent."), 200
 
-# ... (all other routes follow)
+    return jsonify(msg="If an account with that email exists, the username has been sent."), 200
+
+# --- Forgot Password Endpoints ---
+
+@api_bp.route('/forgot-password/request', methods=['POST'])
+def forgot_password_request():
+    data = request.get_json()
+    email = data.get('email')
+
+    if not email:
+        return jsonify(msg="Email is required"), 400
+
+    # 1. Check if user exists with this email
+    user = None
+    for u in User.query.all():
+        if u.email_hash and bcrypt.check_password_hash(u.email_hash, email):
+            user = u
+            break
+    
+    if not user:
+        # Security: Don't reveal if user exists
+        return jsonify(msg="If an account with that email exists, an OTP has been sent."), 200
+
+    # 2. Generate and Store OTP
+    otp = str(random.randint(100000, 999999))
+    code_hash = bcrypt.generate_password_hash(otp).decode('utf-8')
+    expires_at = dt.utcnow() + timedelta(minutes=10)
+
+    # Remove any existing codes for this email
+    VerificationCode.query.filter_by(email=email).delete()
+
+    new_code = VerificationCode(email=email, code_hash=code_hash, expires_at=expires_at)
+    db.session.add(new_code)
+    db.session.commit()
+
+    # 3. Send OTP
+    if not send_verification_email(email, otp):
+        return jsonify(msg="Could not send OTP. Please try again later."), 500
+
+    return jsonify(msg="If an account with that email exists, an OTP has been sent."), 200
+
+@api_bp.route('/forgot-password/verify', methods=['POST'])
+def forgot_password_verify():
+    data = request.get_json()
+    email = data.get('email')
+    otp = data.get('otp')
+
+    if not email or not otp:
+        return jsonify(msg="Email and OTP are required"), 400
+
+    verification = VerificationCode.query.filter_by(email=email).order_by(VerificationCode.expires_at.desc()).first()
+
+    if not verification:
+        return jsonify(msg="Invalid or expired OTP."), 400
+    
+    if dt.utcnow() > verification.expires_at:
+        db.session.delete(verification)
+        db.session.commit()
+        return jsonify(msg="OTP has expired."), 400
+
+    if not bcrypt.check_password_hash(verification.code_hash, otp):
+        return jsonify(msg="Invalid OTP."), 400
+
+    return jsonify(msg="OTP verified successfully."), 200
+
+@api_bp.route('/forgot-password/reset', methods=['POST'])
+def forgot_password_reset():
+    data = request.get_json()
+    email = data.get('email')
+    otp = data.get('otp')
+    new_password = data.get('new_password')
+
+    if not all([email, otp, new_password]):
+        return jsonify(msg="Email, OTP, and new password are required"), 400
+
+    # 1. Verify OTP again (crucial for security)
+    verification = VerificationCode.query.filter_by(email=email).order_by(VerificationCode.expires_at.desc()).first()
+    
+    if not verification:
+        return jsonify(msg="Invalid or expired OTP."), 400
+        
+    if dt.utcnow() > verification.expires_at:
+        db.session.delete(verification)
+        db.session.commit()
+        return jsonify(msg="OTP has expired."), 400
+
+    if not bcrypt.check_password_hash(verification.code_hash, otp):
+        return jsonify(msg="Invalid OTP."), 400
+
+    # 2. Find User and Update Password
+    user = None
+    for u in User.query.all():
+        if u.email_hash and bcrypt.check_password_hash(u.email_hash, email):
+            user = u
+            break
+            
+    if not user:
+         return jsonify(msg="User not found."), 404
+
+    user.set_password(new_password)
+    
+    # 3. Cleanup OTP
+    db.session.delete(verification)
+    db.session.commit()
+
+    return jsonify(msg="Password reset successfully. You can now login."), 200
 
 @api_bp.route('/admin/register', methods=['POST'])
 def register_admin():
@@ -249,6 +542,26 @@ def register_admin():
     db.session.commit()
 
     return jsonify(msg="Admin registered successfully"), 201
+
+@api_bp.route('/admin/change-password', methods=['POST'])
+@jwt_required()
+def admin_change_password():
+    data = request.get_json()
+    new_password = data.get('newPassword')
+    
+    if not new_password:
+        return jsonify(msg="New password is required"), 400
+        
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify(msg="User not found"), 404
+        
+    user.set_password(new_password)
+    db.session.commit()
+    
+    return jsonify(msg="Password updated successfully"), 200
 
 @api_bp.route('/upload', methods=['POST'])
 @jwt_required()
@@ -446,8 +759,12 @@ def register_verify_and_create():
         return jsonify(msg="Invalid verification code."), 401
 
     for u in User.query.all():
-        if u.email_hash and bcrypt.check_password_hash(u.email_hash, email):
-            return jsonify(msg="An account with this email already exists."), 409
+        if u.email_hash:
+            try:
+                if bcrypt.check_password_hash(u.email_hash, email):
+                    return jsonify(msg="An account with this email already exists."), 409
+            except ValueError:
+                continue
 
     unique_username = generate_unique_username()
     email_hash = bcrypt.generate_password_hash(email).decode('utf-8')
@@ -608,9 +925,229 @@ def get_counselors():
             "name": c.user.username,
             "specialty": c.specialization,
             "reviews": dummy_reviews, 
-            "image": dummy_image
+            "image": dummy_image,
+            "availability": c.availability,
+            "contact": c.user.email_hash # In a real app this would be decoded or a separate field
         })
     return jsonify(result)
+
+@api_bp.route("/admin/counselors", methods=["POST"])
+@roles_required('admin')
+def register_counselor():
+    data = request.get_json()
+    
+    # 1. Create User
+    if User.query.filter_by(username=data['username']).first():
+        return jsonify(msg="Username already exists"), 409
+        
+    new_user = User(
+        username=data['username'],
+        email_hash=data.get('email', 'placeholder@email.com'), # simplified for demo
+        role=UserRole.COUNSELOR
+    )
+    new_user.set_password(data['password'])
+    db.session.add(new_user)
+    db.session.flush() # Get ID
+    
+    # 2. Create Profile
+    new_profile = CounselorProfile(
+        user_id=new_user.id,
+        specialization=data.get('specialization', 'General'),
+        availability=data.get('availability', {})
+    )
+    db.session.add(new_profile)
+    db.session.commit()
+    
+    return jsonify(msg="Counselor registered successfully", id=new_user.id), 201
+
+@api_bp.route("/admin/counselors/<int:counselor_id>", methods=["PUT"])
+@roles_required('admin')
+def update_counselor(counselor_id):
+    data = request.get_json()
+    
+    # query the CounselorProfile
+    profile = CounselorProfile.query.get(counselor_id)
+    if not profile:
+        return jsonify(msg="Counselor profile not found"), 404
+        
+    user = User.query.get(profile.user_id)
+    if not user:
+         return jsonify(msg="Counselor user not found"), 404
+
+    # Update User fields (if provided)
+    if 'username' in data and data['username'] != user.username:
+        if User.query.filter_by(username=data['username']).first():
+            return jsonify(msg="Username already exists"), 409
+        user.username = data['username']
+        
+    if 'email' in data:
+        # In a real app, validate email format
+        user.email_hash = data['email'] # simplified reuse of field
+        
+    if 'password' in data and data['password']:
+        user.set_password(data['password'])
+        
+    # Update Profile fields
+    if 'specialization' in data:
+        profile.specialization = data['specialization']
+        
+    if 'availability' in data:
+        # Expecting structure: { "days": ["Mon", "Wed"], "timeRange": "09:00-17:00" }
+        profile.availability = data['availability']
+        
+    db.session.commit()
+    return jsonify(msg="Counselor updated successfully"), 200
+
+# --- RESOURCE MANAGEMENT ENDPOINTS (Admin) ---
+
+@api_bp.route('/admin/resources/<int:resource_id>', methods=['PUT'])
+@roles_required('admin')
+def update_resource(resource_id):
+    data = request.get_json()
+    resource = Resource.query.get(resource_id)
+    if not resource:
+        return jsonify(msg="Resource not found"), 404
+        
+    if 'title' in data: resource.title = data['title']
+    if 'description' in data: resource.description = data['description']
+    if 'content' in data: resource.content = data['content']
+    if 'url' in data: resource.url = data['url']
+    if 'type' in data: resource.type = data['type']
+    if 'status' in data: resource.status = data['status']
+    
+    db.session.commit()
+    return jsonify(msg="Resource updated successfully"), 200
+
+@api_bp.route('/admin/resources/<int:resource_id>', methods=['DELETE'])
+@roles_required('admin')
+def delete_resource(resource_id):
+    resource = Resource.query.get(resource_id)
+    if not resource:
+        return jsonify(msg="Resource not found"), 404
+        
+    db.session.delete(resource)
+    db.session.commit()
+    return jsonify(msg="Resource deleted successfully"), 200
+
+# --- ANALYTICS ENDPOINTS ---
+
+@api_bp.route('/admin/analytics/overview', methods=['GET'])
+@roles_required('admin')
+def get_analytics_overview():
+    # 1. Total Users
+    total_users = User.query.count()
+    
+    # 2. Active Users (Users with activity in last 30 days)
+    thirty_days_ago = datetime.datetime.utcnow() - datetime.timedelta(days=30)
+    active_users = User.query.join(UserActivityLog).filter(UserActivityLog.timestamp >= thirty_days_ago).distinct().count()
+    
+    # 3. Total Sessions (Appointments with status 'completed' - assuming logic, or just all booked)
+    total_sessions = Appointment.query.filter_by(status='completed').count()
+    
+    # 4. Avg Session Duration (Placeholder - existing model doesn't strictly track duration in minutes usually)
+    # We'll return a static or calculated proxy
+    avg_duration = "45 min" 
+    
+    return jsonify({
+        "totalUsers": total_users,
+        "activeUsers": active_users,
+        "totalSessions": total_sessions,
+        "avgSessionDuration": avg_duration
+    })
+
+@api_bp.route('/admin/students', methods=['GET'])
+@roles_required('admin')
+def get_students():
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 10, type=int)
+    
+    students_query = User.query.filter_by(role=UserRole.STUDENT).order_by(User.id.desc())
+    pagination = students_query.paginate(page=page, per_page=per_page, error_out=False)
+    
+    students_data = []
+    today = datetime.datetime.utcnow().date()
+    
+    for student in pagination.items:
+        # Count mood check-ins today
+        mood_count = MoodCheckin.query.filter(
+            MoodCheckin.user_id == student.id,
+            func.date(MoodCheckin.timestamp) == today
+        ).count()
+        
+        # Count resource activities today
+        resource_count = UserActivityLog.query.filter(
+            UserActivityLog.user_id == student.id,
+            func.date(UserActivityLog.timestamp) == today
+        ).count()
+        
+        students_data.append({
+            "id": student.id,
+            "username": student.username,
+            "stats": {
+                "mood_checkins": mood_count,
+                "resources_viewed": resource_count
+            }
+        })
+        
+    return jsonify({
+        "students": students_data,
+        "total": pagination.total,
+        "pages": pagination.pages,
+        "current_page": page
+    }), 200
+
+@api_bp.route('/admin/analytics/chatbot', methods=['GET'])
+@roles_required('admin')
+def get_chatbot_analytics():
+    # 1. Emotional Distribution
+    emotions_data = db.session.query(
+        ChatHistory.emotion, func.count(ChatHistory.id)
+    ).filter(ChatHistory.sender == 'user').group_by(ChatHistory.emotion).all()
+    
+    emotion_dist = {emotion if emotion else 'neutral': count for emotion, count in emotions_data}
+    
+    # 2. Intent Distribution (Clusters)
+    intents_data = db.session.query(
+        ChatHistory.intent, func.count(ChatHistory.id)
+    ).filter(ChatHistory.sender == 'user').group_by(ChatHistory.intent).all()
+    
+    intent_dist = {intent if intent else 'general': count for intent, count in intents_data}
+    
+    # 3. Completion Rate
+    total_sessions = ChatSession.query.count()
+    completed_sessions = ChatSession.query.filter_by(is_completed=True).count()
+    completion_rate = (completed_sessions / total_sessions * 100) if total_sessions > 0 else 0
+    
+    # 4. Crisis Count
+    crisis_count = ChatHistory.query.filter_by(is_crisis=True).count()
+    
+    # 5. Emotional Trends (Last 7 days)
+    seven_days_ago = datetime.datetime.utcnow() - datetime.timedelta(days=7)
+    trend_data = db.session.query(
+        func.date(ChatHistory.timestamp), ChatHistory.emotion, func.count(ChatHistory.id)
+    ).filter(
+        ChatHistory.sender == 'user',
+        ChatHistory.timestamp >= seven_days_ago
+    ).group_by(func.date(ChatHistory.timestamp), ChatHistory.emotion).all()
+    
+    trends = {}
+    for date, emotion, count in trend_data:
+        date_str = date.strftime("%Y-%m-%d")
+        if date_str not in trends:
+            trends[date_str] = {}
+        trends[date_str][emotion if emotion else 'neutral'] = count
+        
+    # 6. Avg Feedback Score
+    avg_feedback = db.session.query(func.avg(ChatSession.feedback_score)).scalar() or 0
+    
+    return jsonify({
+        "emotionDistribution": emotion_dist,
+        "intentDistribution": intent_dist,
+        "completionRate": round(completion_rate, 2),
+        "crisisCount": crisis_count,
+        "trends": trends,
+        "avgFeedbackScore": round(float(avg_feedback), 2)
+    }), 200
 
 @api_bp.route('/appointments', methods=['POST'])
 @jwt_required()
@@ -627,6 +1164,11 @@ def book_appointment():
     if not all([counselor_id, appointment_date_str, appointment_time_str, mode]):
         return jsonify({"error": "Counselor ID, date, time, and mode are required"}), 400
     
+    # Rectified: Generate a meeting link only for 'video_call' mode
+    meeting_link = None
+    if mode == 'video_call':
+        meeting_link = f"/session/{uuid.uuid4()}"
+
     try:
         counselor = User.query.get(int(counselor_id))
     except (ValueError, TypeError):
@@ -651,21 +1193,17 @@ def book_appointment():
     if existing_appointment:
         return jsonify({"error": "This time slot is already booked. Please choose another one."}), 409
 
-    # Rectified: Generate a meeting link only for 'video_call' mode
-    meeting_link = None
-    if mode == 'video_call':
-        meeting_link = f"/session/{uuid.uuid4()}"
-
     new_appointment = Appointment(
         student_id=student_id,
         counselor_id=counselor.id,
         appointment_time=appointment_time,
         status="pending",
         notes=description,
-        mode=mode, # Save the mode from the frontend
-        meeting_link=None # Link generated upon acceptance
+        mode=mode, 
+        meeting_link=meeting_link # Link generated if video_call
     )
     db.session.add(new_appointment)
+    
     student_msg = f"Your appointment with {counselor.username} is confirmed for {appointment_time.strftime('%b %d, %Y at %I:%M %p')}."
     counselor_msg = f"You have a new appointment with a student for {appointment_time.strftime('%b %d, %Y at %I:%M %p')}."
 
@@ -688,6 +1226,166 @@ def book_appointment():
             "meeting_link": new_appointment.meeting_link
         }
     }), 201
+
+# --- ANALYTICS ENDPOINTS ---
+@api_bp.route('/admin/analytics/engagement', methods=['GET'])
+@roles_required('admin')
+def get_engagement_stats():
+    # Last 7 days
+    today = datetime.datetime.utcnow().date()
+    days = [(today - datetime.timedelta(days=i)).strftime('%a') for i in range(6, -1, -1)]
+    
+    # Placeholder: In real app, query User and UserActivityLog tables with group_by date
+    # Mocking data structure for frontend chart
+    import random
+    new_users = [{"label": day, "value": random.randint(5, 50)} for day in days]
+    active_sessions = [{"label": day, "value": random.randint(20, 100)} for day in days]
+    
+    return jsonify({
+        "newUsers": new_users,
+        "activeSessions": active_sessions
+    })
+
+@api_bp.route('/admin/analytics/mood', methods=['GET'])
+@roles_required('admin')
+def get_mood_analytics():
+    # Last 7 days mood checkins
+    today = datetime.datetime.utcnow().date()
+    start_date = today - datetime.timedelta(days=7)
+    
+    # Query MoodCheckin
+    checkins = db.session.query(
+        func.date(MoodCheckin.timestamp), MoodCheckin.mood, func.count(MoodCheckin.id)
+    ).filter(MoodCheckin.timestamp >= start_date).group_by(func.date(MoodCheckin.timestamp), MoodCheckin.mood).all()
+    
+    # Process into format for AnxietyAnalysisChart
+    # Simplified mapping: Happy/Calm -> Low, Neutral -> Medium, Sad/Angry/Anxious -> High
+    mood_map = {
+        'happy': 'low', 'calm': 'low', 
+        'neutral': 'medium', 
+        'sad': 'high', 'angry': 'high', 'anxious': 'high'
+    }
+    
+    data_map = {}
+    days = [(today - datetime.timedelta(days=i)).strftime('%Y-%m-%d') for i in range(6, -1, -1)]
+    
+    for day in days:
+        data_map[day] = {'low': 0, 'medium': 0, 'high': 0, 'day': datetime.datetime.strptime(day, '%Y-%m-%d').strftime('%a')}
+        
+    for date, mood, count in checkins:
+        date_str = date.strftime('%Y-%m-%d')
+        if date_str in data_map:
+            severity = mood_map.get(mood.lower(), 'medium')
+            data_map[date_str][severity] += count
+            
+    return jsonify(list(data_map.values()))
+
+@api_bp.route('/admin/analytics/resources', methods=['GET'])
+@roles_required('admin')
+def get_resource_analytics():
+    # Top 5 most active resources
+    top_resources = db.session.query(
+        Resource.title, Resource.type, func.count(UserActivityLog.id)
+    ).join(UserActivityLog).group_by(Resource.id).order_by(func.count(UserActivityLog.id).desc()).limit(5).all()
+    
+    return jsonify([
+        {"title": r[0], "type": r[1], "views": r[2]}
+        for r in top_resources
+    ])
+
+@api_bp.route('/admin/analytics/chat', methods=['GET'])
+@roles_required('admin')
+def get_chat_analytics():
+    # 1. Sentiment Arc (Real Logic)
+    # Fetch chats from the last 24 hours
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(hours=24)
+    recent_chats = ChatHistory.query.filter(ChatHistory.timestamp >= cutoff).order_by(ChatHistory.timestamp.asc()).all()
+
+    sentiment_data = []
+    # Bucket sentiments by hour for the trend line
+    sentiment_buckets = {}
+    
+    from textblob import TextBlob
+    from collections import Counter
+
+    all_text = ""
+    
+    for chat in recent_chats:
+        blob = TextBlob(chat.user_message)
+        score = blob.sentiment.polarity
+        
+        # Round to nearest hour for the chart
+        hour_key = chat.timestamp.strftime("%H:00")
+        if hour_key not in sentiment_buckets:
+            sentiment_buckets[hour_key] = []
+        sentiment_buckets[hour_key].append(score)
+        
+        all_text += " " + chat.user_message
+
+    # Calculate average sentiment per hour
+    for hour, scores in sentiment_buckets.items():
+        avg_score = sum(scores) / len(scores)
+        sentiment_data.append({"timestamp": hour, "sentimentScore": round(avg_score, 2)})
+
+    # Sort by time
+    sentiment_data.sort(key=lambda x: x['timestamp'])
+    
+    # If no data, provide a placeholder so chart isn't empty
+    if not sentiment_data:
+        sentiment_data = [{"timestamp": "No Data", "sentimentScore": 0}]
+
+    # 2. Topic Modeling (Simple Keyword Frequency relying on Noun Phrases)
+    blob_all = TextBlob(all_text)
+    # Filter for words > 3 chars to avoid stopwords roughly
+    words = [w.lower() for w in blob_all.words if len(w) > 3 and w.isalpha()]
+    
+    # Common stopwords to exclude (basic list)
+    stopwords = {'this', 'that', 'have', 'from', 'what', 'your', 'with', 'about', 'want', 'feel', 'like', 'just', 'know', 'make', 'time', 'really', 'would', 'could'}
+    filtered_words = [w for w in words if w not in stopwords]
+    
+    word_counts = Counter(filtered_words).most_common(5)
+    
+    topics = []
+    for word, count in word_counts:
+        topics.append({
+            "topic": word.capitalize(),
+            "volume": count,
+            "keywords": [word] # In a real LDA, this would be a cluster of related words
+        })
+    
+    if not topics:
+         topics = [{"topic": "No Chats Yet", "volume": 0, "keywords": []}]
+
+    # 3. Risk Prediction (Keyword based for now)
+    risk_keywords = ['die', 'suicide', 'kill', 'end it', 'hopeless', 'pain', 'hurt']
+    at_risk_users = {} # user_id -> score
+
+    for chat in recent_chats:
+        msg_lower = chat.user_message.lower()
+        for kw in risk_keywords:
+            if kw in msg_lower:
+                if chat.user_id not in at_risk_users:
+                    at_risk_users[chat.user_id] = {"score": 0, "factors": set()}
+                
+                at_risk_users[chat.user_id]["score"] += 20
+                at_risk_users[chat.user_id]["factors"].add(f"Keyword: '{kw}'")
+    
+    risks = []
+    for uid, data in at_risk_users.items():
+        # Get student pseudonym/ID
+        risks.append({
+            "studentId": f"Student_{uid}", 
+            "riskScore": min(data["score"], 100),
+            "riskFactors": list(data["factors"])
+        })
+
+    return jsonify({
+        "sentiment": sentiment_data,
+        "topics": topics,
+        "risks": risks
+    })
+
+
 @api_bp.route('/notifications', methods=['GET'])
 @jwt_required()
 def get_notifications():
@@ -1486,7 +2184,263 @@ def update_counselor_settings():
     if 'specialization' in data:
         profile.specialization = data['specialization']
     if 'availability' in data:
+        data = request.get_json()
+        note_content = data.get('note')
+    
+    if not note_content:
+        return jsonify({"msg": "Note content required"}), 400
+        
+    note = ClientNote(counselor_id=current_user_id, student_id=student_id, note=note_content)
+    db.session.add(note)
+    db.session.commit()
+    
+    return jsonify({"msg": "Note added successfully"}), 201
+
+@api_bp.route('/counsellor/client/<int:student_id>', methods=['GET'])
+@jwt_required()
+def get_client_details(student_id):
+    current_user_id = get_jwt_identity()
+    student = User.query.get(student_id)
+    if not student:
+        return jsonify({"msg": "Student not found"}), 404
+        
+    notes = ClientNote.query.filter_by(counselor_id=current_user_id, student_id=student_id).order_by(ClientNote.timestamp.desc()).all()
+    appointments = Appointment.query.filter_by(counselor_id=current_user_id, student_id=student_id).order_by(Appointment.appointment_time.desc()).all()
+    
+    return jsonify({
+        "student": {
+            "id": student.id,
+            "name": student.username,
+            "email": student.email_hash
+        },
+        "notes": [{"id": n.id, "content": n.note, "timestamp": n.timestamp.isoformat()} for n in notes],
+        "appointments": [{"id": a.id, "date": a.appointment_time.isoformat(), "status": a.status, "mode": a.mode} for a in appointments]
+    }), 200
+
+# --- MESSAGING SYSTEM ---
+
+@api_bp.route('/messages/conversations', methods=['GET'])
+@jwt_required()
+def get_conversations():
+    current_user_id = get_jwt_identity()
+    
+    # Get distinct users communicated with
+    sent_to = db.session.query(ChatMessage.receiver_id).filter_by(sender_id=current_user_id)
+    received_from = db.session.query(ChatMessage.sender_id).filter_by(receiver_id=current_user_id)
+    
+    contact_ids = set([r[0] for r in sent_to.all()] + [r[0] for r in received_from.all()])
+    
+    conversations = []
+    for uid in contact_ids:
+        contact = User.query.get(uid)
+        if contact:
+            # Get last message
+            last_msg = ChatMessage.query.filter(
+                ((ChatMessage.sender_id == current_user_id) & (ChatMessage.receiver_id == uid)) |
+                ((ChatMessage.sender_id == uid) & (ChatMessage.receiver_id == current_user_id))
+            ).order_by(ChatMessage.timestamp.desc()).first()
+            
+            unread_count = ChatMessage.query.filter_by(sender_id=uid, receiver_id=current_user_id, is_read=False).count()
+            
+            conversations.append({
+                "user": {"id": contact.id, "name": contact.username, "role": contact.role.value},
+                "last_message": last_msg.content[:50] + "..." if last_msg else "",
+                "timestamp": last_msg.timestamp.isoformat() if last_msg else None,
+                "unread": unread_count
+            })
+            
+    # Sort by timestamp desc
+    conversations.sort(key=lambda x: x['timestamp'] or "", reverse=True)
+    return jsonify(conversations), 200
+
+@api_bp.route('/messages/<int:user_id>', methods=['GET'])
+@jwt_required()
+def get_messages(user_id):
+    current_user_id = get_jwt_identity()
+    
+    messages = ChatMessage.query.filter(
+        ((ChatMessage.sender_id == current_user_id) & (ChatMessage.receiver_id == user_id)) |
+        ((ChatMessage.sender_id == user_id) & (ChatMessage.receiver_id == current_user_id))
+    ).order_by(ChatMessage.timestamp.asc()).all()
+    
+    return jsonify([
+        {
+            "id": m.id,
+            "sender_id": m.sender_id,
+            "receiver_id": m.receiver_id,
+            "content": m.content,
+            "timestamp": m.timestamp.isoformat(),
+            "is_read": m.is_read
+        } for m in messages
+    ]), 200
+
+@api_bp.route('/messages', methods=['POST'])
+@jwt_required()
+def send_message():
+    current_user_id = get_jwt_identity()
+    data = request.get_json()
+    receiver_id = data.get('receiver_id')
+    content = data.get('content')
+    
+    if not receiver_id or not content:
+        return jsonify({"msg": "Receiver and content required"}), 400
+        
+    msg = ChatMessage(sender_id=current_user_id, receiver_id=receiver_id, content=content)
+    db.session.add(msg)
+    
+    # Create Notification
+    sender = User.query.get(current_user_id)
+    notif = Notification(
+        user_id=receiver_id,
+        message=f"New message from {sender.username}",
+        type="message"
+    )
+    db.session.add(notif)
+    
+    db.session.commit()
+    
+    return jsonify({"msg": "Sent", "id": msg.id, "timestamp": msg.timestamp.isoformat()}), 201
+
+@api_bp.route('/messages/read/<int:sender_id>', methods=['PUT'])
+@jwt_required()
+def mark_messages_read(sender_id):
+    current_user_id = get_jwt_identity()
+    ChatMessage.query.filter_by(sender_id=sender_id, receiver_id=current_user_id, is_read=False)\
+        .update({ChatMessage.is_read: True})
+    db.session.commit()
+    return jsonify({"msg": "Marked read"}), 200
+
+# --- RESOURCES MANAGEMENT ---
+
+@api_bp.route('/counsellor/resources', methods=['GET'])
+@jwt_required()
+def get_counselor_resources():
+    current_user_id = get_jwt_identity()
+    resources = Resource.query.filter_by(author_id=current_user_id).order_by(Resource.created_at.desc()).all()
+    
+    return jsonify([{
+        "id": r.id,
+        "title": r.title,
+        "type": r.type,
+        "status": r.status,
+        "created_at": r.created_at.isoformat() if r.created_at else None
+    } for r in resources]), 200
+
+@api_bp.route('/counsellor/resources', methods=['POST'])
+@jwt_required()
+def create_resource():
+    current_user_id = get_jwt_identity()
+    data = request.get_json()
+    
+    new_res = Resource(
+        title=data.get('title'),
+        description=data.get('description'),
+        type=data.get('type'), # video, audio, article
+        url=data.get('url'),
+        content=data.get('content'),
+        author_id=current_user_id,
+        status='pending'
+    )
+    db.session.add(new_res)
+    db.session.commit()
+    return jsonify({"msg": "Resource submitted for review", "id": new_res.id}), 201
+
+# --- SETTINGS / PROFILE ---
+
+@api_bp.route('/counsellor/settings', methods=['GET'])
+@jwt_required()
+def get_cownsellor_settings():
+    current_user_id = get_jwt_identity()
+    profile = CounselorProfile.query.filter_by(user_id=current_user_id).first()
+    user = User.query.get(current_user_id)
+    
+    if not profile:
+        profile = CounselorProfile(user_id=current_user_id)
+        db.session.add(profile)
+        db.session.commit()
+        
+    return jsonify({
+        "username": user.username,
+        "specialization": profile.specialization,
+        "availability": profile.availability
+    }), 200
+
+@api_bp.route('/counsellor/settings', methods=['PUT'])
+@jwt_required()
+def update_counselor_settings():
+    current_user_id = get_jwt_identity()
+    data = request.get_json()
+    
+    profile = CounselorProfile.query.filter_by(user_id=current_user_id).first()
+    if not profile:
+        profile = CounselorProfile(user_id=current_user_id)
+        db.session.add(profile)
+        
+    if 'specialization' in data:
+        profile.specialization = data['specialization']
+    if 'availability' in data:
         profile.availability = data['availability']
         
     db.session.commit()
     return jsonify({"msg": "Settings updated"}), 200
+
+
+@api_bp.route('/admin/analytics/chatbot', methods=['GET'])
+def chatbot_analytics():
+    try:
+        # 1. Completion Rate
+        total_sessions = ChatSession.query.count()
+        completed_sessions = ChatSession.query.filter_by(is_completed=True).count()
+        completion_rate = round((completed_sessions / total_sessions * 100), 1) if total_sessions > 0 else 0
+
+        # 2. Avg Feedback
+        avg_feedback = db.session.query(func.avg(ChatSession.feedback_score)).scalar() or 0
+        avg_feedback = round(avg_feedback, 1)
+
+        # 3. Crisis Count
+        crisis_count = ChatHistory.query.filter_by(is_crisis=True).count()
+
+        # 4. Emotion Distribution (Pie Chart)
+        emotion_counts = db.session.query(ChatSession.primary_emotion, func.count(ChatSession.primary_emotion)).group_by(ChatSession.primary_emotion).all()
+        emotion_dist = {emotion: count for emotion, count in emotion_counts if emotion}
+
+        # 5. Intent Distribution (Clustering)
+        intent_counts = db.session.query(ChatHistory.intent, func.count(ChatHistory.intent)).filter(ChatHistory.intent != None).group_by(ChatHistory.intent).all()
+        intent_dist = {intent: count for intent, count in intent_counts}
+
+        # 6. Trends (Last 7 days)
+        end_date = datetime.datetime.utcnow()
+        start_date = end_date - datetime.timedelta(days=7)
+        
+        # Safer: Query all records in last 7 days and process in Python
+        recent_history = ChatHistory.query.filter(ChatHistory.timestamp >= start_date).all()
+        
+        trends = {}
+        # Pre-fill last 7 days
+        for i in range(7):
+            d = (end_date - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
+            trends[d] = {"stressed": 0, "anxious": 0, "neutral": 0, "happy": 0, "sadness": 0, "joy": 0, "fear": 0, "anger": 0, "love": 0, "surprise": 0}
+
+        for record in recent_history:
+            d = record.timestamp.strftime('%Y-%m-%d')
+            if d not in trends:
+                continue 
+            
+            emo = record.emotion.lower() if record.emotion else 'neutral'
+            if emo in trends[d]:
+                trends[d][emo] += 1
+            else:
+                trends[d][emo] = 1
+
+        return jsonify({
+            "completionRate": completion_rate,
+            "avgFeedbackScore": avg_feedback,
+            "crisisCount": crisis_count,
+            "emotionDistribution": emotion_dist,
+            "intentDistribution": intent_dist,
+            "trends": trends
+        })
+
+    except Exception as e:
+        print(f"Analytics Error: {e}")
+        return jsonify({"error": str(e)}), 500
