@@ -27,38 +27,34 @@ import resend
 api_bp = Blueprint('api', __name__)
 CORS(api_bp, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True) # Enable CORS for all routes in this blueprint
 
-try:
-    print("Loading chatbot models... (Lazy Load)")
-    from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
-    from peft import PeftModel
-    import torch
+MODELS = {
+    "LISTENER": None,
+    "RESPONDER": None,
+    "EMOTION": None,
+    "SENTIMENT": None
+}
 
-    # Load Listener
-    LISTENER_PIPE = pipeline("text-classification", model="./listener_model", tokenizer="./listener_model")
-    
-    # Load Responder (LoRA)
-    print("Loading base responder model...")
-    base_model_name = "microsoft/DialoGPT-medium"
-    base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
-    print("Loading LoRA adapters...")
-    model = PeftModel.from_pretrained(base_model, "./responder_model")
-    tokenizer = AutoTokenizer.from_pretrained("./responder_model")
-    RESPONDER_PIPE = pipeline("text-generation", model=model, tokenizer=tokenizer)
-    
-    # Emotion classification model for analytics
-    EMOTION_PIPE = pipeline("text-classification", model="bhadresh-savani/bert-base-uncased-emotion", return_all_scores=True)
-    # Sentiment analysis model
-    SENTIMENT_PIPE = pipeline("text-classification", model="distilbert-base-uncased-finetuned-sst-2-english")
-    
-    CHATBOT_MODELS_LOADED = True
-    print("Chatbot models loaded successfully.")
-except Exception as e:
-    LISTENER_PIPE = None
-    RESPONDER_PIPE = None
-    EMOTION_PIPE = None
-    SENTIMENT_PIPE = None
-    CHATBOT_MODELS_LOADED = False
-    print(f"Failed to load chatbot models: {e}")
+def get_chatbot_models():
+    """Lazy-loads models only when needed."""
+    if MODELS["LISTENER"] is None:
+        from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
+        from peft import PeftModel
+        
+        print("Loading models into memory...")
+        # Load Listener
+        MODELS["LISTENER"] = pipeline("text-classification", model="./listener_model", tokenizer="./listener_model")
+        
+        # Load Responder (LoRA)
+        base_model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-medium")
+        model = PeftModel.from_pretrained(base_model, "./responder_model")
+        tokenizer = AutoTokenizer.from_pretrained("./responder_model")
+        MODELS["RESPONDER"] = pipeline("text-generation", model=model, tokenizer=tokenizer)
+        
+        # Load Analytics
+        MODELS["EMOTION"] = pipeline("text-classification", model="bhadresh-savani/bert-base-uncased-emotion", return_all_scores=True)
+        MODELS["SENTIMENT"] = pipeline("text-classification", model="distilbert-base-uncased-finetuned-sst-2-english")
+        
+    return MODELS
 
 CRISIS_RESPONSE = "I'm so sorry you're going through this. Please know that help is available. You can connect with someone immediately by calling 988 in the US or finding a local crisis hotline. Your life is important, and support is available."
 
@@ -120,6 +116,7 @@ def send_with_resend(to_email, subject, body_text):
 
 @api_bp.route('/chatbot', methods=['POST'])
 def chatbot_endpoint():
+    models = get_chatbot_models()
     if not CHATBOT_MODELS_LOADED:
         return jsonify(response="The chatbot models are not available. Please contact support.", followUps=[]), 503
 
