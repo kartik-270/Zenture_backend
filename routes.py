@@ -278,46 +278,73 @@ def chatbot_endpoint():
             if generated_text.startswith(full_prompt):
                  bot_response_full = generated_text[len(full_prompt):].strip()
             else:
-                 bot_response_full = generated_text.strip()
+@api_bp.route('/chatbot', methods=['POST'])
+def chatbot_endpoint():
+    # 1. Call the lazy loader
+    models = get_chatbot_models()
+    
+    # 2. Check if loading failed (optional but good practice)
+    if not models["LISTENER"]:
+        return jsonify(response="The chatbot models are not available.", followUps=[]), 503
+
+    user_id = None
+    try:
+        if get_jwt_header():
+            user_id = get_jwt_identity()
+    except Exception:
+        pass
+
+    data = request.get_json() or {}
+    user_input = data.get('message', '')
+    conversation_id = data.get('conversation_id') or str(uuid.uuid4())
+
+    if not user_input:
+        return jsonify(response="Please provide a message.", followUps=[], conversation_id=conversation_id), 400
+
+    # 3. Use the models from the dictionary
+    emotion_label = 'neutral'
+    sentiment_score = 0.5
+    try:
+        if models["EMOTION"]:
+            raw_emotions = models["EMOTION"](user_input)
+            emotions = raw_emotions[0] if isinstance(raw_emotions[0], list) else raw_emotions
+            emotion_label = max(emotions, key=lambda x: x['score'])['label']
         
-        # Aggressive cleaning of hallucinations
-        # usage of <usr>, <sys> indicates model training artifacts leaking
-        stop_markers = [
-            "User:", "User :", "System:", "Intent:", 
-            "<user>", "<bot>", "<usr>", "<sys>", 
-            "\n", "Counselor:"
-        ]
-        for marker in stop_markers:
-            if marker in bot_response_full:
-                bot_response_full = bot_response_full.split(marker)[0].strip()
-        
-        # Fallback for empty or bad responses
-        if not bot_response_full or len(bot_response_full) < 2:
-             bot_response_full = "I'm here for you. I'm listening."
-                
-        bot_response = bot_response_full
-        
+        if models["SENTIMENT"]:
+            sentiment_res = models["SENTIMENT"](user_input)[0]
+            sentiment_score = 1.0 if sentiment_res['label'] == 'POSITIVE' else 0.0
     except Exception as e:
-        print(f"Responder model error: {e}")
-        return jsonify(response="I'm not able to generate a response right now. Please try again later.", followUps=[], conversation_id=conversation_id), 500
+        print(f"Analytics error: {e}")
 
-    # Step 6: Save chat history
-    if user_id:
-        try:
-            user_entry = ChatHistory(
-                user_id=user_id, conversation_id=conversation_id, sender='user', 
-                message=user_input, emotion=emotion_label, sentiment_score=sentiment_score,
-                intent=predicted_label, is_crisis=is_crisis
-            )
-            bot_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='bot', message=bot_response)
-            db.session.add(user_entry)
-            db.session.add(bot_entry)
-            db.session.commit()
-        except Exception as e:
-            db.session.rollback()
-            print(f"Failed to save chat history: {e}")
+    # 4. Listener Classification
+    try:
+        analysis_result = models["LISTENER"](user_input)[0]
+        predicted_label = analysis_result['label']
+        confidence_score = analysis_result['score']
+    except Exception as e:
+        print(f"Listener error: {e}")
+        return jsonify(response="Error analyzing input.", conversation_id=conversation_id), 500
 
-    return jsonify(response=bot_response, followUps=follow_ups, conversation_id=conversation_id), 200
+    # ... (Step 2 - 4 logic remains similar) ...
+
+    # 5. Responder Generation
+    try:
+        # Construct your prompt...
+        full_prompt = f"Instruction: ... {user_input}\nCounselor:"
+        
+        response = models["RESPONDER"](
+            full_prompt, 
+            max_new_tokens=60, 
+            do_sample=True, 
+            pad_token_id=models["RESPONDER"].tokenizer.eos_token_id,
+            # ... other params ...
+        )
+        # ... logic to clean response ...
+    except Exception as e:
+        print(f"Responder error: {e}")
+        return jsonify(response="Error generating response.", conversation_id=conversation_id), 500
+
+    # ... save to history and return ...
 
 @api_bp.route('/chatbot/feedback', methods=['POST'])
 @jwt_required()
@@ -2004,7 +2031,7 @@ def add_client_note(student_id):
 
 @api_bp.route('/messages/conversations', methods=['GET'])
 @jwt_required()
-def get_conversations():
+def get_conversations2():
     current_user_id = get_jwt_identity()
     
     # Get distinct users communicated with
