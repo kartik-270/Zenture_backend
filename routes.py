@@ -2165,7 +2165,7 @@ def get_client_details(student_id):
 
 @api_bp.route('/messages/conversations', methods=['GET'])
 @jwt_required()
-def get_conversations():
+def get_conversations1():
     current_user_id = get_jwt_identity()
     
     # Get distinct users communicated with
@@ -2199,7 +2199,7 @@ def get_conversations():
 
 @api_bp.route('/messages/<int:user_id>', methods=['GET'])
 @jwt_required()
-def get_messages(user_id):
+def get_messages1(user_id):
     current_user_id = get_jwt_identity()
     
     messages = ChatMessage.query.filter(
