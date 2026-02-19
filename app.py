@@ -38,7 +38,13 @@ def create_app():
 
     return app
 
-app = create_app()
+try:
+    app = create_app()
+    print("APP CREATED SUCCESSFULLY", flush=True)
+except Exception as e:
+    print("APP FAILED TO START:", e, flush=True)
+    raise
+
 
 # --- WebRTC Signaling Events ---
 
