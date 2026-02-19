@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: zenture-backend
+    env: python
+    plan: free
+    autoDeploy: true
+
+    buildCommand: "pip install -r requirements.txt"
+
+    startCommand: gunicorn app:app --worker-class eventlet --bind 0.0.0.0:$PORT --log-level debug
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11
