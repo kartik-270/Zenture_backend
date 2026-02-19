@@ -114,179 +114,21 @@ def send_with_resend(to_email, subject, body_text):
         print(f"Resend error: {e}")
         return False
 
+
 @api_bp.route('/chatbot', methods=['POST'])
 def chatbot_endpoint():
-    models = get_chatbot_models()
-    if not CHATBOT_MODELS_LOADED:
-        return jsonify(response="The chatbot models are not available. Please contact support.", followUps=[]), 503
-
-    user_id = None
-    try:
-        if get_jwt_header():
-            user_id = get_jwt_identity()
-    except Exception as e:
-        pass
-
-    data = request.get_json() or {}
-    user_input = data.get('message', '')
-    # Ensure conversation_id is never None. If missing or None, generate new UUID.
-    conversation_id = data.get('conversation_id') or str(uuid.uuid4())
-
-    if not user_input:
-        return jsonify(response="Please provide a message.", followUps=[], conversation_id=conversation_id), 400
-
-    # Analytics: Emotion & Sentiment Detection
-    emotion_label = 'neutral'
-    sentiment_score = 0.0
-    try:
-        if EMOTION_PIPE:
-            # Note: return_all_scores=True returns [[{'label': 'sadness', 'score': 0.9}, ...]]
-            # But sometimes it might behave differently.
-            raw_emotions = EMOTION_PIPE(user_input)
-            if isinstance(raw_emotions[0], list):
-                emotions = raw_emotions[0]
-            else:
-                emotions = raw_emotions
-            
-            emotion_label = max(emotions, key=lambda x: x['score'])['label']
-        
-        if SENTIMENT_PIPE:
-            sentiment_res = SENTIMENT_PIPE(user_input)[0]
-            # Convert 'POSITIVE'/'NEGATIVE' to score
-            sentiment_score = 1.0 if sentiment_res['label'] == 'POSITIVE' else 0.0
-    except Exception as e:
-        print(f"Analytics model error: {e}")
-
-    # Track or Start Session
-    try:
-        session = ChatSession.query.filter_by(conversation_id=conversation_id).first()
-        if not session:
-            # Create new session if it doesn't exist
-            session = ChatSession(conversation_id=conversation_id, user_id=user_id)
-            db.session.add(session)
-            db.session.commit()
-    except Exception as e:
-        print(f"Session tracking error: {e}")
-        db.session.rollback()
-
-    # Step 1: Listener Model to classify mental health condition
-    try:
-        analysis_result = LISTENER_PIPE(user_input)[0]
-        predicted_label = analysis_result['label']
-        confidence_score = analysis_result['score']
-    except Exception as e:
-        print(f"Listener model error: {e}")
-        return jsonify(response="I'm having trouble understanding that right now. Could you please rephrase?", followUps=[], conversation_id=conversation_id), 500
-
-    # Risk Detection
-    is_crisis = predicted_label == "Suicidal" and confidence_score > 0.8
-    if is_crisis:
-        # ... (crisis handling remains same) ...
-        bot_response = CRISIS_RESPONSE
-        if user_id:
-            try:
-                user_entry = ChatHistory(
-                    user_id=user_id, conversation_id=conversation_id, sender='user', 
-                    message=user_input, emotion=emotion_label, sentiment_score=sentiment_score,
-                    intent=predicted_label, is_crisis=is_crisis
-                )
-                bot_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='bot', message=bot_response)
-                db.session.add(user_entry)
-                db.session.add(bot_entry)
-                db.session.commit()
-            except Exception as e:
-                db.session.rollback()
-                print(f"Failed to save crisis chat history: {e}")
-        return jsonify(response=bot_response, followUps=[], conversation_id=conversation_id), 200
-
-    # Step 3: Get follow-up questions
-    all_follow_ups = FOLLOW_UP_QUESTIONS.get(predicted_label, ["How can I help you today?"])
-    follow_ups = random.sample(all_follow_ups, min(len(all_follow_ups), 2))
-    
-    # Step 4: Retrieve conversation history
-    prompt_history = ""
-    if user_id:
-        conversation_history = ChatHistory.query.filter_by(
-            user_id=user_id,
-            conversation_id=conversation_id
-        ).order_by(ChatHistory.timestamp.asc()).all()
-        
-        # Limit history to lookback_window
-        lookback_window = 6 # Reduce context window to keep prompt clean
-        for turn in conversation_history[-lookback_window:]:
-             prompt_history += f"<{turn.sender}> {turn.message} "
-
-    # Step 5: Generate a response
-    # Step 5: Generate a response
-    try:
-        # Contextualize prompt with sentiment
-        if sentiment_score < 0.3:
-            tone_instruction = "(Be empathetic and supportive)"
-        elif sentiment_score > 0.7:
-            tone_instruction = "(Be encouraging and positive)"
-        else:
-            tone_instruction = "(Be warm and professional)"
-            
-        # DialoGPT works best with a chat-like structure. 
-        # We inject few-shot examples to show the model how to behave.
-        few_shot_examples = (
-            "User: I'm feeling really down today.\n"
-            "Counselor: I'm sorry to hear that. I'm here to listen. What's been on your mind?\n"
-            "User: I'm having a panic attack.\n"
-            "Counselor: Take a deep breath with me. Breathe in... and out. You are safe. I'm here.\n"
-            "User: I hate myself.\n"
-            "Counselor: It sounds like you're in a lot of pain right now. You deserve support and kindness.\n"
-        )
-        
-        full_prompt = (
-            f"Instruction: You are a compassionate mental health counselor. {tone_instruction}\n"
-            f"{few_shot_examples}\n"
-            f"User's status: {predicted_label}.\n"
-            f"{prompt_history}"
-            f"User: {user_input}\n"
-            f"Counselor:"
-        )
-        print(f"DEBUG PROMPT: {full_prompt}")
-        
-        # Generation call
-        response = RESPONDER_PIPE(
-            full_prompt, 
-            max_new_tokens=60, 
-            do_sample=True, 
-            top_k=50, 
-            top_p=0.9,
-            temperature=0.7,
-            repetition_penalty=1.2,
-            pad_token_id=RESPONDER_PIPE.tokenizer.eos_token_id,
-            eos_token_id=RESPONDER_PIPE.tokenizer.eos_token_id,
-            max_length=None
-        )
-        
-        generated_text = response[0]['generated_text']
-        print(f"DEBUG RAW RESPONSE: {generated_text}")
-        
-        # Robust extraction
-        if "Counselor:" in generated_text:
-            # We want the LAST Counselor response, in case the model regenerated the examples
-            parts = generated_text.split("Counselor:")
-            bot_response_full = parts[-1].strip()
-        elif "Bot:" in generated_text: 
-             bot_response_full = generated_text.split("Bot:")[-1].strip()
-        else:
-            # Fallback: try to find where the prompt ended
-            # approximate by checking if prompt is a prefix
-            if generated_text.startswith(full_prompt):
-                 bot_response_full = generated_text[len(full_prompt):].strip()
-            else:
-@api_bp.route('/chatbot', methods=['POST'])
-def chatbot_endpoint():
-    # 1. Call the lazy loader
+    # 1. Initialize models using lazy loader (prevents Port Not Found error)
     models = get_chatbot_models()
     
-    # 2. Check if loading failed (optional but good practice)
-    if not models["LISTENER"]:
-        return jsonify(response="The chatbot models are not available.", followUps=[]), 503
+    # 2. Safety check: Ensure models are ready
+    if not models["LISTENER"] or not models["RESPONDER"]:
+        return jsonify(
+            response="The chatbot models are currently initializing. Please try again in a few seconds.", 
+            followUps=[], 
+            conversation_id=None
+        ), 503
 
+    # 3. Identify user from JWT (if provided)
     user_id = None
     try:
         if get_jwt_header():
@@ -296,12 +138,13 @@ def chatbot_endpoint():
 
     data = request.get_json() or {}
     user_input = data.get('message', '')
+    # Generate or retrieve conversation ID
     conversation_id = data.get('conversation_id') or str(uuid.uuid4())
 
     if not user_input:
         return jsonify(response="Please provide a message.", followUps=[], conversation_id=conversation_id), 400
 
-    # 3. Use the models from the dictionary
+    # 4. Analytics: Emotion & Sentiment Detection
     emotion_label = 'neutral'
     sentiment_score = 0.5
     try:
@@ -314,35 +157,131 @@ def chatbot_endpoint():
             sentiment_res = models["SENTIMENT"](user_input)[0]
             sentiment_score = 1.0 if sentiment_res['label'] == 'POSITIVE' else 0.0
     except Exception as e:
-        print(f"Analytics error: {e}")
+        print(f"Analytics model error: {e}")
 
-    # 4. Listener Classification
+    # 5. Track or Start Session in Database
+    try:
+        session = ChatSession.query.filter_by(conversation_id=conversation_id).first()
+        if not session:
+            session = ChatSession(conversation_id=conversation_id, user_id=user_id)
+            db.session.add(session)
+            db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"Session tracking error: {e}")
+
+    # 6. Step 1: Listener Model (Classification)
     try:
         analysis_result = models["LISTENER"](user_input)[0]
         predicted_label = analysis_result['label']
         confidence_score = analysis_result['score']
     except Exception as e:
-        print(f"Listener error: {e}")
-        return jsonify(response="Error analyzing input.", conversation_id=conversation_id), 500
+        print(f"Listener model error: {e}")
+        return jsonify(response="I'm having trouble understanding. Could you rephrase?", followUps=[], conversation_id=conversation_id), 500
 
-    # ... (Step 2 - 4 logic remains similar) ...
+    # 7. Risk Detection / Crisis Handling
+    is_crisis = predicted_label == "Suicidal" and confidence_score > 0.8
+    if is_crisis:
+        bot_response = CRISIS_RESPONSE
+        if user_id:
+            try:
+                user_entry = ChatHistory(
+                    user_id=user_id, conversation_id=conversation_id, sender='user', 
+                    message=user_input, emotion=emotion_label, sentiment_score=sentiment_score,
+                    intent=predicted_label, is_crisis=is_crisis
+                )
+                bot_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='bot', message=bot_response)
+                db.session.add_all([user_entry, bot_entry])
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"Failed to save crisis history: {e}")
+        return jsonify(response=bot_response, followUps=[], conversation_id=conversation_id), 200
 
-    # 5. Responder Generation
-    try:
-        # Construct your prompt...
-        full_prompt = f"Instruction: ... {user_input}\nCounselor:"
+    # 8. Retrieve Conversation History for Context
+    prompt_history = ""
+    if user_id:
+        conversation_history = ChatHistory.query.filter_by(
+            user_id=user_id,
+            conversation_id=conversation_id
+        ).order_by(ChatHistory.timestamp.asc()).all()
         
+        lookback_window = 6
+        for turn in conversation_history[-lookback_window:]:
+             prompt_history += f"<{turn.sender}> {turn.message} "
+
+    # 9. Step 2: Generate Response with Responder Model
+    try:
+        tone_instruction = "(Be warm and professional)"
+        if sentiment_score < 0.3:
+            tone_instruction = "(Be empathetic and supportive)"
+        elif sentiment_score > 0.7:
+            tone_instruction = "(Be encouraging and positive)"
+            
+        few_shot_examples = (
+            "User: I'm feeling really down today.\nCounselor: I'm sorry to hear that. I'm here to listen.\n"
+            "User: I'm having a panic attack.\nCounselor: Take a deep breath. You are safe.\n"
+        )
+        
+        full_prompt = (
+            f"Instruction: You are a compassionate mental health counselor. {tone_instruction}\n"
+            f"{few_shot_examples}\n"
+            f"User's status: {predicted_label}.\n"
+            f"{prompt_history}User: {user_input}\nCounselor:"
+        )
+
         response = models["RESPONDER"](
             full_prompt, 
             max_new_tokens=60, 
             do_sample=True, 
+            top_k=50, 
+            top_p=0.9,
+            temperature=0.7,
+            repetition_penalty=1.2,
             pad_token_id=models["RESPONDER"].tokenizer.eos_token_id,
-            # ... other params ...
+            eos_token_id=models["RESPONDER"].tokenizer.eos_token_id
         )
-        # ... logic to clean response ...
+
+        generated_text = response[0]['generated_text']
+        
+        # Extract response after the last 'Counselor:' tag
+        if "Counselor:" in generated_text:
+            bot_response = generated_text.split("Counselor:")[-1].strip()
+        else:
+            bot_response = generated_text.replace(full_prompt, "").strip()
+
+        # Clean hallucinations/artifacts
+        stop_markers = ["User:", "System:", "<user>", "<bot>", "\n", "Counselor:"]
+        for marker in stop_markers:
+            bot_response = bot_response.split(marker)[0].strip()
+        
+        if not bot_response:
+            bot_response = "I'm here for you. I'm listening."
+
     except Exception as e:
-        print(f"Responder error: {e}")
-        return jsonify(response="Error generating response.", conversation_id=conversation_id), 500
+        print(f"Responder model error: {e}")
+        return jsonify(response="I'm not able to generate a response right now.", followUps=[], conversation_id=conversation_id), 500
+
+    # 10. Final Step: Save History & Return Response
+    all_follow_ups = FOLLOW_UP_QUESTIONS.get(predicted_label, ["How can I help you today?"])
+    follow_ups = random.sample(all_follow_ups, min(len(all_follow_ups), 2))
+
+    if user_id:
+        try:
+            user_entry = ChatHistory(
+                user_id=user_id, conversation_id=conversation_id, sender='user', 
+                message=user_input, emotion=emotion_label, sentiment_score=sentiment_score,
+                intent=predicted_label, is_crisis=False
+            )
+            bot_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='bot', message=bot_response)
+            db.session.add_all([user_entry, bot_entry])
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Failed to save chat history: {e}")
+
+    return jsonify(response=bot_response, followUps=follow_ups, conversation_id=conversation_id), 200
+
 
     # ... save to history and return ...
 
