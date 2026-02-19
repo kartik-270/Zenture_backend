@@ -2001,26 +2001,7 @@ def add_client_note(student_id):
     
     return jsonify({"msg": "Note added successfully"}), 201
 
-@api_bp.route('/counsellor/client/<int:student_id>', methods=['GET'])
-@jwt_required()
-def get_client_details(student_id):
-    current_user_id = get_jwt_identity()
-    student = User.query.get(student_id)
-    if not student:
-        return jsonify({"msg": "Student not found"}), 404
-        
-    notes = ClientNote.query.filter_by(counselor_id=current_user_id, student_id=student_id).order_by(ClientNote.timestamp.desc()).all()
-    appointments = Appointment.query.filter_by(counselor_id=current_user_id, student_id=student_id).order_by(Appointment.appointment_time.desc()).all()
-    
-    return jsonify({
-        "student": {
-            "id": student.id,
-            "name": student.username,
-            "email": student.email_hash
-        },
-        "notes": [{"id": n.id, "content": n.note, "timestamp": n.timestamp.isoformat()} for n in notes],
-        "appointments": [{"id": a.id, "date": a.appointment_time.isoformat(), "status": a.status, "mode": a.mode} for a in appointments]
-    }), 200
+
 
 # --- MESSAGING SYSTEM ---
 
