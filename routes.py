@@ -379,7 +379,7 @@ def forgot_username():
     
     return jsonify(msg="If an account with that email exists, the username has been sent."), 200
 
-    return jsonify(msg="If an account with that email exists, the username has been sent."), 200
+
 
 # --- Forgot Password Endpoints ---
 
@@ -787,18 +787,7 @@ def login():
     
 # --- Resource Hub Endpoints ---
 
-@api_bp.route('/resources', methods=['GET'])
-@jwt_required()
-def get_resources():
-    resources = Resource.query.all()
-    return jsonify([{
-        "id": r.id,
-        "title": r.title,
-        "description": r.description,
-        "type": r.type,
-        "language": r.language,
-        "url": r.url
-    } for r in resources])
+
 
 @api_bp.route('/resources', methods=['POST'])
 @roles_required('admin', 'counselor')
@@ -1970,7 +1959,7 @@ def add_client_note(student_id):
 
 @api_bp.route('/messages/conversations', methods=['GET'])
 @jwt_required()
-def get_conversations2():
+def get_conversations():
     current_user_id = get_jwt_identity()
     
     # Get distinct users communicated with
@@ -2128,17 +2117,10 @@ def update_counselor_settings():
     if 'specialization' in data:
         profile.specialization = data['specialization']
     if 'availability' in data:
-        data = request.get_json()
-        note_content = data.get('note')
-    
-    if not note_content:
-        return jsonify({"msg": "Note content required"}), 400
+        profile.availability = data['availability']
         
-    note = ClientNote(counselor_id=current_user_id, student_id=student_id, note=note_content)
-    db.session.add(note)
     db.session.commit()
-    
-    return jsonify({"msg": "Note added successfully"}), 201
+    return jsonify(msg="Settings updated"), 200
 
 @api_bp.route('/counsellor/client/<int:student_id>', methods=['GET'])
 @jwt_required()
@@ -2161,230 +2143,4 @@ def get_client_details(student_id):
         "appointments": [{"id": a.id, "date": a.appointment_time.isoformat(), "status": a.status, "mode": a.mode} for a in appointments]
     }), 200
 
-# --- MESSAGING SYSTEM ---
 
-@api_bp.route('/messages/conversations', methods=['GET'])
-@jwt_required()
-def get_conversations1():
-    current_user_id = get_jwt_identity()
-    
-    # Get distinct users communicated with
-    sent_to = db.session.query(ChatMessage.receiver_id).filter_by(sender_id=current_user_id)
-    received_from = db.session.query(ChatMessage.sender_id).filter_by(receiver_id=current_user_id)
-    
-    contact_ids = set([r[0] for r in sent_to.all()] + [r[0] for r in received_from.all()])
-    
-    conversations = []
-    for uid in contact_ids:
-        contact = User.query.get(uid)
-        if contact:
-            # Get last message
-            last_msg = ChatMessage.query.filter(
-                ((ChatMessage.sender_id == current_user_id) & (ChatMessage.receiver_id == uid)) |
-                ((ChatMessage.sender_id == uid) & (ChatMessage.receiver_id == current_user_id))
-            ).order_by(ChatMessage.timestamp.desc()).first()
-            
-            unread_count = ChatMessage.query.filter_by(sender_id=uid, receiver_id=current_user_id, is_read=False).count()
-            
-            conversations.append({
-                "user": {"id": contact.id, "name": contact.username, "role": contact.role.value},
-                "last_message": last_msg.content[:50] + "..." if last_msg else "",
-                "timestamp": last_msg.timestamp.isoformat() if last_msg else None,
-                "unread": unread_count
-            })
-            
-    # Sort by timestamp desc
-    conversations.sort(key=lambda x: x['timestamp'] or "", reverse=True)
-    return jsonify(conversations), 200
-
-@api_bp.route('/messages/<int:user_id>', methods=['GET'])
-@jwt_required()
-def get_messages1(user_id):
-    current_user_id = get_jwt_identity()
-    
-    messages = ChatMessage.query.filter(
-        ((ChatMessage.sender_id == current_user_id) & (ChatMessage.receiver_id == user_id)) |
-        ((ChatMessage.sender_id == user_id) & (ChatMessage.receiver_id == current_user_id))
-    ).order_by(ChatMessage.timestamp.asc()).all()
-    
-    return jsonify([
-        {
-            "id": m.id,
-            "sender_id": m.sender_id,
-            "receiver_id": m.receiver_id,
-            "content": m.content,
-            "timestamp": m.timestamp.isoformat(),
-            "is_read": m.is_read
-        } for m in messages
-    ]), 200
-
-@api_bp.route('/messages', methods=['POST'])
-@jwt_required()
-def send_message():
-    current_user_id = get_jwt_identity()
-    data = request.get_json()
-    receiver_id = data.get('receiver_id')
-    content = data.get('content')
-    
-    if not receiver_id or not content:
-        return jsonify({"msg": "Receiver and content required"}), 400
-        
-    msg = ChatMessage(sender_id=current_user_id, receiver_id=receiver_id, content=content)
-    db.session.add(msg)
-    
-    # Create Notification
-    sender = User.query.get(current_user_id)
-    notif = Notification(
-        user_id=receiver_id,
-        message=f"New message from {sender.username}",
-        type="message"
-    )
-    db.session.add(notif)
-    
-    db.session.commit()
-    
-    return jsonify({"msg": "Sent", "id": msg.id, "timestamp": msg.timestamp.isoformat()}), 201
-
-@api_bp.route('/messages/read/<int:sender_id>', methods=['PUT'])
-@jwt_required()
-def mark_messages_read(sender_id):
-    current_user_id = get_jwt_identity()
-    ChatMessage.query.filter_by(sender_id=sender_id, receiver_id=current_user_id, is_read=False)\
-        .update({ChatMessage.is_read: True})
-    db.session.commit()
-    return jsonify({"msg": "Marked read"}), 200
-
-# --- RESOURCES MANAGEMENT ---
-
-@api_bp.route('/counsellor/resources', methods=['GET'])
-@jwt_required()
-def get_counselor_resources():
-    current_user_id = get_jwt_identity()
-    resources = Resource.query.filter_by(author_id=current_user_id).order_by(Resource.created_at.desc()).all()
-    
-    return jsonify([{
-        "id": r.id,
-        "title": r.title,
-        "type": r.type,
-        "status": r.status,
-        "created_at": r.created_at.isoformat() if r.created_at else None
-    } for r in resources]), 200
-
-@api_bp.route('/counsellor/resources', methods=['POST'])
-@jwt_required()
-def create_resource():
-    current_user_id = get_jwt_identity()
-    data = request.get_json()
-    
-    new_res = Resource(
-        title=data.get('title'),
-        description=data.get('description'),
-        type=data.get('type'), # video, audio, article
-        url=data.get('url'),
-        content=data.get('content'),
-        author_id=current_user_id,
-        status='pending'
-    )
-    db.session.add(new_res)
-    db.session.commit()
-    return jsonify({"msg": "Resource submitted for review", "id": new_res.id}), 201
-
-# --- SETTINGS / PROFILE ---
-
-@api_bp.route('/counsellor/settings', methods=['GET'])
-@jwt_required()
-def get_cownsellor_settings():
-    current_user_id = get_jwt_identity()
-    profile = CounselorProfile.query.filter_by(user_id=current_user_id).first()
-    user = User.query.get(current_user_id)
-    
-    if not profile:
-        profile = CounselorProfile(user_id=current_user_id)
-        db.session.add(profile)
-        db.session.commit()
-        
-    return jsonify({
-        "username": user.username,
-        "specialization": profile.specialization,
-        "availability": profile.availability
-    }), 200
-
-@api_bp.route('/counsellor/settings', methods=['PUT'])
-@jwt_required()
-def update_counselor_settings():
-    current_user_id = get_jwt_identity()
-    data = request.get_json()
-    
-    profile = CounselorProfile.query.filter_by(user_id=current_user_id).first()
-    if not profile:
-        profile = CounselorProfile(user_id=current_user_id)
-        db.session.add(profile)
-        
-    if 'specialization' in data:
-        profile.specialization = data['specialization']
-    if 'availability' in data:
-        profile.availability = data['availability']
-        
-    db.session.commit()
-    return jsonify({"msg": "Settings updated"}), 200
-
-
-@api_bp.route('/admin/analytics/chatbot', methods=['GET'])
-def chatbot_analytics():
-    try:
-        # 1. Completion Rate
-        total_sessions = ChatSession.query.count()
-        completed_sessions = ChatSession.query.filter_by(is_completed=True).count()
-        completion_rate = round((completed_sessions / total_sessions * 100), 1) if total_sessions > 0 else 0
-
-        # 2. Avg Feedback
-        avg_feedback = db.session.query(func.avg(ChatSession.feedback_score)).scalar() or 0
-        avg_feedback = round(avg_feedback, 1)
-
-        # 3. Crisis Count
-        crisis_count = ChatHistory.query.filter_by(is_crisis=True).count()
-
-        # 4. Emotion Distribution (Pie Chart)
-        emotion_counts = db.session.query(ChatSession.primary_emotion, func.count(ChatSession.primary_emotion)).group_by(ChatSession.primary_emotion).all()
-        emotion_dist = {emotion: count for emotion, count in emotion_counts if emotion}
-
-        # 5. Intent Distribution (Clustering)
-        intent_counts = db.session.query(ChatHistory.intent, func.count(ChatHistory.intent)).filter(ChatHistory.intent != None).group_by(ChatHistory.intent).all()
-        intent_dist = {intent: count for intent, count in intent_counts}
-
-        # 6. Trends (Last 7 days)
-        end_date = datetime.datetime.utcnow()
-        start_date = end_date - datetime.timedelta(days=7)
-        
-        # Safer: Query all records in last 7 days and process in Python
-        recent_history = ChatHistory.query.filter(ChatHistory.timestamp >= start_date).all()
-        
-        trends = {}
-        # Pre-fill last 7 days
-        for i in range(7):
-            d = (end_date - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
-            trends[d] = {"stressed": 0, "anxious": 0, "neutral": 0, "happy": 0, "sadness": 0, "joy": 0, "fear": 0, "anger": 0, "love": 0, "surprise": 0}
-
-        for record in recent_history:
-            d = record.timestamp.strftime('%Y-%m-%d')
-            if d not in trends:
-                continue 
-            
-            emo = record.emotion.lower() if record.emotion else 'neutral'
-            if emo in trends[d]:
-                trends[d][emo] += 1
-            else:
-                trends[d][emo] = 1
-
-        return jsonify({
-            "completionRate": completion_rate,
-            "avgFeedbackScore": avg_feedback,
-            "crisisCount": crisis_count,
-            "emotionDistribution": emotion_dist,
-            "intentDistribution": intent_dist,
-            "trends": trends
-        })
-
-    except Exception as e:
-        print(f"Analytics Error: {e}")
-        return jsonify({"error": str(e)}), 500
