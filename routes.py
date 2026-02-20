@@ -619,7 +619,16 @@ def send_verification_email(email, code):
     try:
         subject = "Your Verification Code for Mental Health Platform"
         msg = Message(subject, recipients=[email])
-        msg.body = f"""
+        '''msg.body = f"""
+Hello,
+
+Thank you for registering. Your verification code is: {code}
+
+This code will expire in 10 minutes.
+
+If you did not request this, please ignore this email.
+"""'''
+        body = f"""
 Hello,
 
 Thank you for registering. Your verification code is: {code}
@@ -628,7 +637,9 @@ This code will expire in 10 minutes.
 
 If you did not request this, please ignore this email.
 """
-        mail.send(msg)
+        #mail.send(msg)
+        if not send_with_resend(email, subject, body):
+            return "daily limit exceeded"
         return True
     except Exception as e:
         print(f"Error sending email: {e}")
