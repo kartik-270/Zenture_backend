@@ -21,3 +21,4 @@ accelerate
 requests
 huggingface_hub
 gradio
+cloudinary

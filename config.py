@@ -30,6 +30,11 @@ class Config:
     # Maileroo configuration
     MAILEROO_API_KEY = os.environ.get('MAILEROO_API_KEY')
     
+    # Cloudinary configuration
+    CLOUDINARY_CLOUD_NAME = os.environ.get('cloud_name')
+    CLOUDINARY_API_KEY = os.environ.get('api_key')
+    CLOUDINARY_API_SECRET = os.environ.get('api_secret')
+    
     # Session Management
     from datetime import timedelta
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)

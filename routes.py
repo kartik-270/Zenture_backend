@@ -290,6 +290,12 @@ def chatbot_endpoint():
         for marker in stop_markers:
             bot_response = bot_response.split(marker)[0].strip()
         
+        follow_ups = []
+        if sentiment_score < 0.2:
+            if "Counselor" not in bot_response and "session" not in bot_response:
+                bot_response += " If you're feeling overwhelmed, speaking with a professional might help. You can book a confidential session here."
+            follow_ups.append("Book a Counselor Session")
+        
         if not bot_response:
             bot_response = "I'm here for you. I'm listening."
 
@@ -299,7 +305,10 @@ def chatbot_endpoint():
 
     # 10. Final Step: Save History & Return Response
     all_follow_ups = FOLLOW_UP_QUESTIONS.get(predicted_label, ["How can I help you today?"])
-    follow_ups = random.sample(all_follow_ups, min(len(all_follow_ups), 2))
+    random_follow_ups = random.sample(all_follow_ups, min(len(all_follow_ups), 2))
+    
+    # Merge sentiment referrals if any
+    final_follow_ups = list(set(follow_ups + random_follow_ups))
 
     if user_id:
         try:
@@ -313,9 +322,9 @@ def chatbot_endpoint():
             db.session.commit()
         except Exception as e:
             db.session.rollback()
-            print(f"Failed to save chat history: {e}")
+            print(f"Failed to save history: {e}")
 
-    return jsonify(response=bot_response, followUps=follow_ups, conversation_id=conversation_id), 200
+    return jsonify(response=bot_response, followUps=final_follow_ups, conversation_id=conversation_id), 200
 
 
     # ... save to history and return ...
@@ -353,7 +362,7 @@ def end_chatbot_session():
     if not session:
         return jsonify(msg="Session not found"), 404
         
-    session.end_time = datetime.datetime.utcnow()
+    session.end_time = dt.utcnow()
     session.is_completed = True
     
     # Calculate primary emotion for the session
@@ -561,24 +570,6 @@ def admin_change_password():
     
     return jsonify(msg="Password updated successfully"), 200
 
-@api_bp.route('/upload', methods=['POST'])
-@jwt_required()
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({"msg": "No file part"}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"msg": "No selected file"}), 400
-        
-    if file:
-        filename = secure_filename(file.filename)
-        unique_filename = f"{uuid.uuid4().hex}_{filename}"
-        filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], unique_filename)
-        file.save(filepath)
-        
-        file_url = f"/uploads/{unique_filename}" 
-        return jsonify({"url": file_url, "filename": unique_filename}), 201
-
 # --- PUBLIC RESOURCES (HUB) ---
 
 @api_bp.route('/resources', methods=['GET'])
@@ -784,6 +775,40 @@ def register_verify_and_create():
     return jsonify(msg="Account created successfully. Please log in with your unique username.", username=unique_username), 201
 
 
+import cloudinary
+import cloudinary.uploader
+
+@api_bp.route('/upload', methods=['POST'])
+@jwt_required()
+def upload_media():
+    if 'file' not in request.files:
+        return jsonify({"msg": "No file part"}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"msg": "No selected file"}), 400
+
+    try:
+        # Initialize Cloudinary configuration
+        cloudinary.config(
+            cloud_name=current_app.config['CLOUDINARY_CLOUD_NAME'],
+            api_key=current_app.config['CLOUDINARY_API_KEY'],
+            api_secret=current_app.config['CLOUDINARY_API_SECRET'],
+            secure=True
+        )
+
+        # Upload the file to Cloudinary
+        upload_result = cloudinary.uploader.upload(file)
+        
+        return jsonify({
+            "msg": "File uploaded successfully",
+            "url": upload_result.get("secure_url")
+        }), 200
+    except Exception as e:
+        print(f"Cloudinary upload error: {e}")
+        return jsonify({"msg": f"Failed to upload media: {str(e)}"}), 500
+
+
 @api_bp.route('/register/complete-profile', methods=['POST'])
 @jwt_required()
 def complete_profile():
@@ -811,6 +836,33 @@ def complete_profile():
     db.session.commit()
 
     return jsonify(msg="Your profile has been securely saved."), 201
+
+@api_bp.route('/admin/analytics/assessments', methods=['GET'])
+@roles_required('admin')
+def get_assessment_analytics():
+    try:
+        # Get count per test type
+        counts = db.session.query(
+            AssessmentResult.test_type,
+            db.func.count(AssessmentResult.id)
+        ).group_by(AssessmentResult.test_type).all()
+        
+        # Get high-risk distribution (scores indicating severe issues)
+        # For simplicity, we'll just return counts of each test type for now
+        # and maybe some basic breakdown if we have a bigger dataset.
+        
+        data = []
+        for test, count in counts:
+            data.append({"test": test, "count": count})
+            
+        return jsonify(data), 200
+    except Exception as e:
+        return jsonify(msg=str(e)), 500
+
+# Safety Check / Health
+@api_bp.route('/health', methods=['GET'])
+def health_check():
+    return jsonify(status="ok"), 200
 
 @api_bp.route('/login', methods=['POST'])
 def login():
@@ -846,6 +898,30 @@ def add_resource():
     db.session.commit()
     return jsonify(msg="Resource added successfully"), 201
 
+@api_bp.route('/assessments', methods=['POST'])
+@jwt_required()
+def save_assessment():
+    current_user_id = get_jwt_identity()
+    data = request.get_json()
+    
+    if not data or 'test_type' not in data or 'score' not in data:
+        return jsonify(msg="Missing required fields"), 400
+        
+    result = AssessmentResult(
+        user_id=current_user_id,
+        test_type=data.get('test_type'),
+        score=data.get('score'),
+        interpretation=data.get('interpretation')
+    )
+    
+    try:
+        db.session.add(result)
+        db.session.commit()
+        return jsonify(msg="Assessment result saved successfully"), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify(msg=f"Error saving assessment: {str(e)}"), 500
+
 # --- Counselor and Appointment Endpoints ---
 @api_bp.route('/admin/dashboard', methods=['GET'])
 @roles_required('admin')
@@ -879,7 +955,7 @@ def get_upcoming_appointments():
             .join(User, Appointment.student_id == User.id)
             .filter(
                 Appointment.status == 'booked',
-                Appointment.appointment_time >= dt.datetime.utcnow()
+                Appointment.appointment_time >= dt.utcnow()
             )
             .order_by(Appointment.appointment_time.asc())
             .limit(5)
@@ -921,6 +997,7 @@ def get_counselors():
             "reviews": dummy_reviews, 
             "image": dummy_image,
             "availability": c.availability,
+            "meeting_location": c.meeting_location,
             "contact": c.user.email_hash # In a real app this would be decoded or a separate field
         })
     return jsonify(result)
@@ -947,7 +1024,8 @@ def register_counselor():
     new_profile = CounselorProfile(
         user_id=new_user.id,
         specialization=data.get('specialization', 'General'),
-        availability=data.get('availability', {})
+        availability=data.get('availability', {}),
+        meeting_location=data.get('meeting_location')
     )
     db.session.add(new_profile)
     db.session.commit()
@@ -989,6 +1067,9 @@ def update_counselor(counselor_id):
         # Expecting structure: { "days": ["Mon", "Wed"], "timeRange": "09:00-17:00" }
         profile.availability = data['availability']
         
+    if 'meeting_location' in data:
+        profile.meeting_location = data['meeting_location']
+        
     db.session.commit()
     return jsonify(msg="Counselor updated successfully"), 200
 
@@ -1008,6 +1089,7 @@ def update_resource(resource_id):
     if 'url' in data: resource.url = data['url']
     if 'type' in data: resource.type = data['type']
     if 'status' in data: resource.status = data['status']
+    if 'language' in data: resource.language = data['language']
     
     db.session.commit()
     return jsonify(msg="Resource updated successfully"), 200
@@ -1032,7 +1114,7 @@ def get_analytics_overview():
     total_users = User.query.count()
     
     # 2. Active Users (Users with activity in last 30 days)
-    thirty_days_ago = datetime.datetime.utcnow() - datetime.timedelta(days=30)
+    thirty_days_ago = dt.utcnow() - timedelta(days=30)
     active_users = User.query.join(UserActivityLog).filter(UserActivityLog.timestamp >= thirty_days_ago).distinct().count()
     
     # 3. Total Sessions (Appointments with status 'completed' - assuming logic, or just all booked)
@@ -1068,12 +1150,12 @@ def get_counselors_status():
     online = total_counselors
     
     # Available now: Check how many don't have an active ongoing appointment
-    now = datetime.datetime.utcnow()
+    now = dt.utcnow()
     # Active appointments are those where status is 'booked' and time is around now
     busy_counselors = Appointment.query.filter(
         Appointment.status == 'booked',
         Appointment.appointment_time <= now,
-        Appointment.appointment_time >= now - datetime.timedelta(hours=1)
+        Appointment.appointment_time >= now - timedelta(hours=1)
     ).distinct(Appointment.counselor_id).count()
     
     available = max(0, total_counselors - busy_counselors)
@@ -1087,7 +1169,7 @@ def get_counselors_status():
 @api_bp.route('/admin/analytics/forum-activity', methods=['GET'])
 @roles_required('admin')
 def get_forum_activity():
-    twenty_four_hours_ago = datetime.datetime.utcnow() - datetime.timedelta(hours=24)
+    twenty_four_hours_ago = dt.utcnow() - timedelta(hours=24)
     
     new_posts = ForumPost.query.filter(ForumPost.timestamp >= twenty_four_hours_ago).count()
     
@@ -1113,7 +1195,7 @@ def get_students():
     pagination = students_query.paginate(page=page, per_page=per_page, error_out=False)
     
     students_data = []
-    today = datetime.datetime.utcnow().date()
+    today = dt.utcnow().date()
     
     for student in pagination.items:
         # Count mood check-ins today
@@ -1139,6 +1221,46 @@ def get_students():
         
     return jsonify({
         "students": students_data,
+        "total": pagination.total,
+        "pages": pagination.pages,
+        "current_page": page
+    }), 200
+
+@api_bp.route('/admin/moderators', methods=['GET'])
+@roles_required('admin')
+def get_moderators():
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 10, type=int)
+    
+    moderators_query = User.query.filter_by(role=UserRole.MODERATOR).order_by(User.id.desc())
+    pagination = moderators_query.paginate(page=page, per_page=per_page, error_out=False)
+    
+    moderators_data = []
+    today = dt.utcnow().date()
+    
+    for mod in pagination.items:
+        # Same stats as students
+        mood_count = MoodCheckin.query.filter(
+            MoodCheckin.user_id == mod.id,
+            func.date(MoodCheckin.timestamp) == today
+        ).count()
+        
+        resource_count = UserActivityLog.query.filter(
+            UserActivityLog.user_id == mod.id,
+            func.date(UserActivityLog.timestamp) == today
+        ).count()
+        
+        moderators_data.append({
+            "id": mod.id,
+            "username": mod.username,
+            "stats": {
+                "mood_checkins": mood_count,
+                "resources_viewed": resource_count
+            }
+        })
+        
+    return jsonify({
+        "moderators": moderators_data,
         "total": pagination.total,
         "pages": pagination.pages,
         "current_page": page
@@ -1170,7 +1292,7 @@ def get_chatbot_analytics():
     crisis_count = ChatHistory.query.filter_by(is_crisis=True).count()
     
     # 5. Emotional Trends (Last 7 days)
-    seven_days_ago = datetime.datetime.utcnow() - datetime.timedelta(days=7)
+    seven_days_ago = dt.utcnow() - timedelta(days=7)
     trend_data = db.session.query(
         func.date(ChatHistory.timestamp), ChatHistory.emotion, func.count(ChatHistory.id)
     ).filter(
@@ -1280,8 +1402,8 @@ def book_appointment():
 @roles_required('admin')
 def get_engagement_stats():
     # Last 7 days
-    today = datetime.datetime.utcnow().date()
-    days = [(today - datetime.timedelta(days=i)).strftime('%a') for i in range(6, -1, -1)]
+    today = dt.utcnow().date()
+    days = [(today - timedelta(days=i)).strftime('%a') for i in range(6, -1, -1)]
     
     # Placeholder: In real app, query User and UserActivityLog tables with group_by date
     # Mocking data structure for frontend chart
@@ -1298,8 +1420,8 @@ def get_engagement_stats():
 @roles_required('admin')
 def get_mood_analytics():
     # Last 7 days mood checkins
-    today = datetime.datetime.utcnow().date()
-    start_date = today - datetime.timedelta(days=7)
+    today = dt.utcnow().date()
+    start_date = today - timedelta(days=7)
     
     # Query MoodCheckin
     checkins = db.session.query(
@@ -1315,10 +1437,10 @@ def get_mood_analytics():
     }
     
     data_map = {}
-    days = [(today - datetime.timedelta(days=i)).strftime('%Y-%m-%d') for i in range(6, -1, -1)]
+    days = [(today - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(6, -1, -1)]
     
     for day in days:
-        data_map[day] = {'low': 0, 'medium': 0, 'high': 0, 'day': datetime.datetime.strptime(day, '%Y-%m-%d').strftime('%a')}
+        data_map[day] = {'low': 0, 'medium': 0, 'high': 0, 'day': dt.strptime(day, '%Y-%m-%d').strftime('%a')}
         
     for date, mood, count in checkins:
         date_str = date.strftime('%Y-%m-%d')
@@ -1346,7 +1468,7 @@ def get_resource_analytics():
 def get_chat_analytics():
     # 1. Sentiment Arc (Real Logic)
     # Fetch chats from the last 24 hours
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(hours=24)
+    cutoff = dt.utcnow() - timedelta(hours=24)
     recent_chats = ChatHistory.query.filter(ChatHistory.timestamp >= cutoff).order_by(ChatHistory.timestamp.asc()).all()
 
     sentiment_data = []
@@ -1550,8 +1672,8 @@ def reply_to_post(post_id):
 def get_today_mood_checkin():
     """Checks if the current user has already submitted a mood today."""
     user_id = get_jwt_identity()
-    today_start = dt.combine(datetime.date.today(), datetime.time.min)
-    today_end = dt.combine(datetime.date.today(), datetime.time.max)
+    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
+    today_end = datetime.datetime.combine(datetime.date.today(), datetime.time.max)
 
     checkin = MoodCheckin.query.filter(
         MoodCheckin.user_id == user_id,
@@ -1570,8 +1692,8 @@ def add_mood_checkin():
     """Adds a mood check-in for the current user, if one for today doesn't exist."""
     user_id = get_jwt_identity()
     
-    today_start = dt.combine(datetime.date.today(), datetime.time.min)
-    today_end = dt.combine(datetime.date.today(), datetime.time.max)
+    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
+    today_end = datetime.datetime.combine(datetime.date.today(), datetime.time.max)
     existing_checkin = MoodCheckin.query.filter(
         MoodCheckin.user_id == user_id,
         MoodCheckin.timestamp >= today_start,
@@ -1717,24 +1839,38 @@ def get_counselor_profile(profile_id):
     # Set of booked times strings
     booked_times = {appt.appointment_time.strftime("%H:%M") for appt in booked_appointments}
 
-    # Generate 30-minute slots from 09:00 to 18:00
+    # Custom Availability Logic
+    avail = counselor_profile.availability or {}
+    allowed_days = avail.get("days", ["Mon", "Tue", "Wed", "Thu", "Fri"])
+    time_range = avail.get("timeRange", "09:00-18:00")
+    
+    current_day_str = date_obj.strftime("%a") # "Mon", "Tue", etc.
+    
     slots = []
-    current_time = dt.strptime("09:00", "%H:%M")
-    end_time_limit = dt.strptime("18:00", "%H:%M")
+    if current_day_str in allowed_days:
+        try:
+            start_str, end_str = time_range.split("-")
+            current_time = dt.strptime(start_str, "%H:%M")
+            end_time_limit = dt.strptime(end_str, "%H:%M")
+        except:
+            # Fallback
+            current_time = dt.strptime("09:00", "%H:%M")
+            end_time_limit = dt.strptime("18:00", "%H:%M")
 
-    while current_time <= end_time_limit:
-        time_str = current_time.strftime("%H:%M")
-        slots.append({
-            "time": time_str,
-            "available": time_str not in booked_times
-        })
-        current_time += timedelta(minutes=30)
+        while current_time <= end_time_limit:
+            time_str = current_time.strftime("%H:%M")
+            slots.append({
+                "time": time_str,
+                "available": time_str not in booked_times
+            })
+            current_time += timedelta(minutes=30)
 
     return jsonify({
         "counselor_id": counselor_profile.user_id,
         "name": counselor_profile.user.username,
         "specialization": counselor_profile.specialization,
-        "available_slots": slots
+        "available_slots": slots,
+        "meeting_location": counselor_profile.meeting_location
     })
 @api_bp.route('/student/dashboard-data', methods=['GET'])
 @roles_required('student')
@@ -2172,6 +2308,7 @@ def create_resource():
         type=data.get('type'), # video, audio, article
         url=data.get('url'),
         content=data.get('content'),
+        language=data.get('language', 'English'),
         author_id=current_user_id,
         status='pending'
     )
@@ -2196,7 +2333,8 @@ def get_cownsellor_settings():
     return jsonify({
         "username": user.username,
         "specialization": profile.specialization,
-        "availability": profile.availability
+        "availability": profile.availability,
+        "meeting_location": profile.meeting_location
     }), 200
 
 @api_bp.route('/counsellor/settings', methods=['PUT'])
@@ -2214,6 +2352,8 @@ def update_counselor_settings():
         profile.specialization = data['specialization']
     if 'availability' in data:
         profile.availability = data['availability']
+    if 'meeting_location' in data:
+        profile.meeting_location = data['meeting_location']
         
     db.session.commit()
     return jsonify(msg="Settings updated"), 200

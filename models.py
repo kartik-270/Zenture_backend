@@ -114,6 +114,8 @@ class CounselorProfile(db.Model):
     user = db.relationship('User', backref=db.backref('counselor_profile', uselist=False))
     specialization = db.Column(db.String(150))
     availability = db.Column(db.JSON)
+    meeting_location = db.Column(db.String(255), nullable=True)
+
 
 class Appointment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -190,6 +192,7 @@ class ForumPost(db.Model):
     author_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     title = db.Column(db.String(200), nullable=False)
     content = db.Column(db.Text, nullable=False)
+    media_url = db.Column(db.String(255), nullable=True)
     likes_count = db.Column(db.Integer, default=0)
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     author = db.relationship('User', backref='forum_posts')
@@ -213,3 +216,14 @@ class Notification(db.Model):
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
     user = db.relationship('User', backref=db.backref('notifications', lazy=True))
+
+class AssessmentResult(db.Model):
+    __tablename__ = 'assessment_result'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    test_type = db.Column(db.String(20), nullable=False) # PHQ-9, GAD-7, GHQ-12
+    score = db.Column(db.Integer, nullable=False)
+    interpretation = db.Column(db.String(100), nullable=True)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    
+    user = db.relationship('User', backref=db.backref('assessment_results', lazy=True))

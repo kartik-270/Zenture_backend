@@ -1,10 +1,12 @@
 from flask import Blueprint, request, jsonify
+from flask_cors import CORS
 from models import db, User, UserRole, Community, CommunityMember, ForumPost, ForumReply, ChatMessage
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from routes import roles_required
 import datetime
 
 community_bp = Blueprint('community', __name__)
+CORS(community_bp, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # --- Community Management ---
 
@@ -97,6 +99,7 @@ def get_community_posts(community_id):
             "id": p.id,
             "title": p.title,
             "content": p.content,
+            "media_url": getattr(p, 'media_url', None),
             "likes_count": p.likes_count,
             "reply_count": p.replies.count(),
             "timestamp": p.timestamp.isoformat(),
@@ -119,6 +122,7 @@ def create_community_post(community_id):
     data = request.get_json()
     title = data.get('title')
     content = data.get('content')
+    media_url = data.get('media_url')
 
     if not title or not content:
         return jsonify({"msg": "Title and content are required"}), 400
@@ -127,7 +131,7 @@ def create_community_post(community_id):
     if not community:
         return jsonify({"msg": "Community not found"}), 404
 
-    new_post = ForumPost(title=title, content=content, author_id=user_id, community_id=community_id)
+    new_post = ForumPost(title=title, content=content, media_url=media_url, author_id=user_id, community_id=community_id)
     db.session.add(new_post)
     db.session.commit()
 
@@ -243,11 +247,19 @@ def delete_community(community_id):
 # --- Moderation ---
 
 @community_bp.route('/posts/<int:post_id>', methods=['DELETE'])
-@roles_required('admin', 'moderator')
+@jwt_required()
 def delete_post(post_id):
+    user_id = int(get_jwt_identity())
+    from flask_jwt_extended import get_jwt
+    claims = get_jwt()
+    user_role = claims.get('role')
+
     post = ForumPost.query.get(post_id)
     if not post:
         return jsonify({"msg": "Post not found"}), 404
+
+    if user_role not in ['admin', 'moderator'] and post.author_id != user_id:
+        return jsonify({"msg": "Unauthorized to delete this post"}), 403
 
     db.session.delete(post)
     db.session.commit()
@@ -267,13 +279,35 @@ def block_user(target_user_id):
 @community_bp.route('/admin/assign_moderator', methods=['POST'])
 @roles_required('admin')
 def assign_moderator():
-    data = request.get_json()
-    username = data.get('username')
+    try:
+        data = request.get_json()
+        username = data.get('username')
 
-    user = User.query.filter_by(username=username).first()
-    if not user:
-        return jsonify({"msg": "User not found"}), 404
-        
-    user.role = UserRole.MODERATOR
-    db.session.commit()
-    return jsonify({"msg": f"{username} is now a moderator"}), 200
+        user = User.query.filter_by(username=username).first()
+        if not user:
+            return jsonify({"msg": "User not found"}), 404
+            
+        user.role = UserRole.MODERATOR
+        db.session.commit()
+        return jsonify({"msg": f"{username} is now a moderator"}), 200
+    except Exception as e:
+        print(f"Error in assign_moderator: {e}")
+        return jsonify({"msg": f"Internal server error: {str(e)}"}), 500
+
+@community_bp.route('/admin/revoke_moderator', methods=['POST'])
+@roles_required('admin')
+def revoke_moderator():
+    try:
+        data = request.get_json()
+        username = data.get('username')
+
+        user = User.query.filter_by(username=username).first()
+        if not user:
+            return jsonify({"msg": "User not found"}), 404
+            
+        user.role = UserRole.STUDENT
+        db.session.commit()
+        return jsonify({"msg": f"{username} is no longer a moderator"}), 200
+    except Exception as e:
+        print(f"Error in revoke_moderator: {e}")
+        return jsonify({"msg": f"Internal server error: {str(e)}"}), 500
