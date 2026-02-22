@@ -22,7 +22,7 @@ import os
 import shutil
 import base64
 from flask_mail import Message
-import resend
+import requests
 
 api_bp = Blueprint('api', __name__)
 CORS(api_bp, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True) # Enable CORS for all routes in this blueprint
@@ -64,25 +64,34 @@ def test_email_config():
     config_info = {
         "MAIL_SERVER": current_app.config.get('MAIL_SERVER'),
         "MAIL_PORT": current_app.config.get('MAIL_PORT'),
-        "MAIL_USE_TLS": current_app.config.get('MAIL_USE_TLS'),
-        "MAIL_USE_SSL": current_app.config.get('MAIL_USE_SSL'),
-        "RESEND_KEY_SET": bool(current_app.config.get('RESEND_API_KEY')),
+        "MAIL_USERNAME": current_app.config.get('MAIL_USERNAME'),
+        "MAILEROO_KEY_SET": bool(current_app.config.get('MAILEROO_API_KEY')),
     }
     
-    # Check if we should use Resend (for production)
-    if current_app.config.get('RESEND_API_KEY'):
+    # Check if we should use Maileroo (for production)
+    if current_app.config.get('MAILEROO_API_KEY'):
         try:
-            resend.api_key = current_app.config.get('RESEND_API_KEY')
-            params = {
-                "from": "Zenture <onboarding@resend.dev>",
-                "to": current_app.config.get('MAIL_USERNAME') or "recipient@example.com",
-                "subject": "Zenture Email Diagnostic (Resend)",
-                "text": "This email was sent via the Resend HTTP API to bypass SMTP blocks."
+            api_key = current_app.config.get('MAILEROO_API_KEY')
+            url = "https://smtp.maileroo.com/api/v2/emails"
+            headers = {
+                "X-Api-Key": api_key,
+                "Content-Type": "application/json"
             }
-            resend.Emails.send(params)
-            return jsonify({"status": "success", "method": "Resend API", "config": config_info}), 200
+            payload = {
+                "from": {"address": current_app.config.get('MAIL_DEFAULT_SENDER') or "no-reply@zenture.com", "name": "Zenture"},
+                "to": [{"address": current_app.config.get('MAIL_USERNAME') or "recipient@example.com"}],
+                "subject": "Zenture Email Diagnostic (Maileroo)",
+                "plain": "This email was sent via the Maileroo HTTP API to bypass SMTP blocks."
+            }
+            response = requests.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+
+            return jsonify({"status": "success", "method": "Maileroo API", "config": config_info}), 200
+        except requests.exceptions.HTTPError as e:
+            error_msg = e.response.text if hasattr(e, 'response') and e.response else str(e)
+            return jsonify({"status": "error", "method": "Maileroo API", "error": error_msg, "config": config_info}), 500
         except Exception as e:
-            return jsonify({"status": "error", "method": "Resend API", "error": str(e), "config": config_info}), 500
+            return jsonify({"status": "error", "method": "Maileroo API", "error": str(e), "config": config_info}), 500
 
     # Fallback to SMTP (for local)
     import eventlet
@@ -96,22 +105,48 @@ def test_email_config():
     except Exception as e:
         return jsonify({"status": "error", "method": "SMTP", "error": str(e), "config": config_info}), 500
 
-def send_with_resend(to_email, subject, body_text):
-    """Helper to send email via Resend API."""
+def send_with_maileroo(to_email, subject, body_text):
+    """Helper to send email via Maileroo API."""
     try:
-        if not current_app.config.get('RESEND_API_KEY'):
+        api_key = current_app.config.get('MAILEROO_API_KEY')
+        if not api_key:
+            print("Missing MAILEROO_API_KEY")
             return False
-        resend.api_key = current_app.config.get('RESEND_API_KEY')
-        params = {
-            "from": "Zenture <onboarding@resend.dev>",
-            "to": to_email,
-            "subject": subject,
-            "text": body_text,
+        
+        url = "https://smtp.maileroo.com/api/v2/emails"
+        
+        headers = {
+            "X-API-Key": api_key,
+            "Content-Type": "application/json"
         }
-        resend.Emails.send(params)
+
+        payload = {
+            "from": {
+                "address": "zenture@53d5a76f1add5fd6.maileroo.org",
+                "name": "Zenture"
+            },
+            "to": [
+                {
+                    "address": to_email
+                }
+            ],
+            "subject": subject,
+            "plain": body_text
+        }
+
+        response = requests.post(url, json=payload, headers=headers)
+
+        print(response.status_code)
+        print(response.text)
+
+        response.raise_for_status()
         return True
+
+    except requests.exceptions.HTTPError as e:
+        print("Maileroo HTTP Error:", e.response.text)
+        return False
     except Exception as e:
-        print(f"Resend error: {e}")
+        print("Maileroo error:", str(e))
         return False
 
 
@@ -331,7 +366,7 @@ def end_chatbot_session():
     db.session.commit()
     return jsonify(msg="Session ended successfully"), 200
 def send_username_email(email, username):
-    """Sends username via Resend API (production) or SMTP (local fallback)."""
+    """Sends username via Maileroo API (production) or SMTP (local fallback)."""
     subject = "Your Username for Mental Health Platform"
     body = f"""
 Hello,
@@ -340,8 +375,8 @@ You requested your username. Your username is: {username}
 
 If you did not request this, please ignore this email.
 """
-    # 1. Try Resend First (Production)
-    if send_with_resend(email, subject, body):
+    # 1. Try Maileroo First (Production)
+    if send_with_maileroo(email, subject, body):
         return True
         
     # 2. Fallback to SMTP (Local)
@@ -616,10 +651,8 @@ def register_counsellor():
     return jsonify(msg="Counsellor registered successfully"), 201
 
 def send_verification_email(email, code):
-    try:
-        subject = "Your Verification Code for Mental Health Platform"
-        msg = Message(subject, recipients=[email])
-        msg.body = f"""
+    subject = "Your Verification Code for Zenture Wellness"
+    body = f"""
 Hello,
 
 Thank you for registering. Your verification code is: {code}
@@ -628,6 +661,15 @@ This code will expire in 10 minutes.
 
 If you did not request this, please ignore this email.
 """
+    
+    # 1. Try Maileroo First
+    if send_with_maileroo(email, subject, body):
+        return True
+        
+    # 2. Fallback to SMTP
+    try:
+        msg = Message(subject, recipients=[email])
+        msg.body = body
         mail.send(msg)
         return True
     except Exception as e:
@@ -996,15 +1038,69 @@ def get_analytics_overview():
     # 3. Total Sessions (Appointments with status 'completed' - assuming logic, or just all booked)
     total_sessions = Appointment.query.filter_by(status='completed').count()
     
-    # 4. Avg Session Duration (Placeholder - existing model doesn't strictly track duration in minutes usually)
-    # We'll return a static or calculated proxy
+    # 4. Total Sessions (Appointments with status 'completed')
+    total_sessions = Appointment.query.filter_by(status='completed').count()
+    
+    # Avg Session Duration (Placeholder)
     avg_duration = "45 min" 
+    
+    # 5. Urgent Action Required (Unacknowledged Crisis)
+    unacknowledged_alerts = ChatHistory.query.filter_by(is_crisis=True).count()
+    # Let's count all `is_crisis=True` for now since we lack an acknowledgement flag.
     
     return jsonify({
         "totalUsers": total_users,
         "activeUsers": active_users,
         "totalSessions": total_sessions,
-        "avgSessionDuration": avg_duration
+        "avgSessionDuration": avg_duration,
+        "unacknowledgedAlerts": unacknowledged_alerts
+    })
+
+@api_bp.route('/admin/analytics/counselors-status', methods=['GET'])
+@roles_required('admin')
+def get_counselors_status():
+    from flask import jsonify
+    
+    total_counselors = CounselorProfile.query.count()
+    # Let's consider counselors with availability configured as at least active. 
+    # For a real app, you'd check a last_active timestamp or WebSocket connection.
+    # We will simulate "Online" based on total counselors for now
+    online = total_counselors
+    
+    # Available now: Check how many don't have an active ongoing appointment
+    now = datetime.datetime.utcnow()
+    # Active appointments are those where status is 'booked' and time is around now
+    busy_counselors = Appointment.query.filter(
+        Appointment.status == 'booked',
+        Appointment.appointment_time <= now,
+        Appointment.appointment_time >= now - datetime.timedelta(hours=1)
+    ).distinct(Appointment.counselor_id).count()
+    
+    available = max(0, total_counselors - busy_counselors)
+    
+    return jsonify({
+        "online": online,
+        "available": available,
+        "avgWaitTime": "~2 mins" 
+    })
+
+@api_bp.route('/admin/analytics/forum-activity', methods=['GET'])
+@roles_required('admin')
+def get_forum_activity():
+    twenty_four_hours_ago = datetime.datetime.utcnow() - datetime.timedelta(hours=24)
+    
+    new_posts = ForumPost.query.filter(ForumPost.timestamp >= twenty_four_hours_ago).count()
+    
+    # Assuming all posts are unmoderated initially, but since we don't have a moderated flag, 
+    # we'll return 0 or the total new posts for the demo.
+    unmoderated_posts = ForumPost.query.count() // 2 # Mocked logic if no flag exists
+    
+    active_threads = ForumPost.query.join(ForumReply).distinct(ForumPost.id).count()
+    
+    return jsonify({
+        "newPosts24h": new_posts,
+        "unmoderatedPosts": unmoderated_posts,
+        "activeThreads": active_threads
     })
 
 @api_bp.route('/admin/students', methods=['GET'])

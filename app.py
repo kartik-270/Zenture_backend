@@ -27,7 +27,9 @@ def create_app():
 
     socketio.init_app(app, cors_allowed_origins="*", async_mode='eventlet')
 
+    from community_routes import community_bp
     app.register_blueprint(api_bp, url_prefix='/api')
+    app.register_blueprint(community_bp, url_prefix='/api')
 
     @app.route('/')
     def index():

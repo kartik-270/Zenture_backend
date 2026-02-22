@@ -1,0 +1,7 @@
+transformers
+torch
+peft
+gradio
+scipy
+accelerate
+huggingface_hub

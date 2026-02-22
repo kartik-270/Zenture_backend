@@ -11,6 +11,7 @@ class UserRole(Enum):
     COUNSELOR = 'counselor'
     ADMIN = 'admin'
     PEER_VOLUNTEER = 'peer_volunteer'
+    MODERATOR = 'moderator'
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -18,6 +19,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(128), nullable=False)
     role = db.Column(db.Enum(UserRole), default=UserRole.STUDENT, nullable=False)
     email_hash = db.Column(db.String(128), unique=True, nullable=True)
+    is_blocked = db.Column(db.Boolean, default=False)
 
     def set_password(self, password):
         self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
@@ -163,11 +165,32 @@ class ClientNote(db.Model):
     counselor = db.relationship('User', foreign_keys=[counselor_id])
     student = db.relationship('User', foreign_keys=[student_id])
     
+class Community(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False, unique=True)
+    description = db.Column(db.Text, nullable=True)
+    created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    
+    creator = db.relationship('User', foreign_keys=[created_by_id])
+    posts = db.relationship('ForumPost', backref='community', lazy='dynamic', cascade="all, delete-orphan")
+    members = db.relationship('CommunityMember', backref='community', lazy='dynamic', cascade="all, delete-orphan")
+
+class CommunityMember(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    community_id = db.Column(db.Integer, db.ForeignKey('community.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    joined_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    
+    user = db.relationship('User', backref='community_memberships')
+
 class ForumPost(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    community_id = db.Column(db.Integer, db.ForeignKey('community.id'), nullable=False)
     author_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     title = db.Column(db.String(200), nullable=False)
     content = db.Column(db.Text, nullable=False)
+    likes_count = db.Column(db.Integer, default=0)
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     author = db.relationship('User', backref='forum_posts')
     replies = db.relationship('ForumReply', backref='post', lazy='dynamic', cascade="all, delete-orphan")
