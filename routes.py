@@ -798,7 +798,7 @@ def upload_media():
         )
 
         # Upload the file to Cloudinary
-        upload_result = cloudinary.uploader.upload(file)
+        upload_result = cloudinary.uploader.upload(file, resource_type="auto")
         
         return jsonify({
             "msg": "File uploaded successfully",
