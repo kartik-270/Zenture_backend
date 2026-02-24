@@ -20,6 +20,8 @@ class User(db.Model):
     role = db.Column(db.Enum(UserRole), default=UserRole.STUDENT, nullable=False)
     email_hash = db.Column(db.String(128), unique=True, nullable=True)
     is_blocked = db.Column(db.Boolean, default=False)
+    streak_count = db.Column(db.Integer, default=0)
+    last_checkin_date = db.Column(db.Date, nullable=True)
 
     def set_password(self, password):
         self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
@@ -34,7 +36,12 @@ class MoodCheckin(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     mood = db.Column(db.String(50), nullable=False)
-    timestamp = db.Column(db.DateTime, nullable=False, default=datetime.datetime.utcnow)
+    intensity = db.Column(db.Integer, default=5) # 1-10
+    sleep_quality = db.Column(db.String(50), nullable=True) # Poor, Fair, Good, Excellent
+    social_interaction = db.Column(db.Boolean, default=False)
+    energy_level = db.Column(db.String(50), nullable=True) # Low, Medium, High
+    analysis_report = db.Column(db.Text, nullable=True)
+    timestamp = db.Column(db.DateTime, nullable=False, default=datetime.datetime.now)
     
     user = db.relationship('User', backref=db.backref('mood_checkins', lazy=True))
 

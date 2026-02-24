@@ -1713,53 +1713,153 @@ def reply_to_post(post_id):
 
 # --- Dashboard Endpoints ---
 
-@api_bp.route('/mood-checkin/today-status', methods=['GET']) # <-- RENAMED ENDPOINT
+@api_bp.route('/mood-checkin/today-status', methods=['GET'])
 @jwt_required()
 def get_today_mood_checkin():
-    """Checks if the current user has already submitted a mood today."""
+    """Returns all mood check-ins for today, using last_checkin_date for safety."""
     user_id = get_jwt_identity()
-    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
-    today_end = datetime.datetime.combine(datetime.date.today(), datetime.time.max)
-
-    checkin = MoodCheckin.query.filter(
+    user = User.query.get(user_id)
+    today = datetime.date.today()
+    
+    # Use the User's last_checkin_date to determine if they've already logged today
+    # This is more robust against timezone mismatches than querying timestamps directly
+    has_checked_in = (user.last_checkin_date == today)
+    
+    # Fetch checkins within a wide window (last 24h) to catch timezone overlaps in history
+    # but filter for the ones users would consider "today"
+    checkins = MoodCheckin.query.filter(
         MoodCheckin.user_id == user_id,
-        MoodCheckin.timestamp >= today_start,
-        MoodCheckin.timestamp <= today_end
-    ).first()
+        MoodCheckin.timestamp >= datetime.datetime.now() - datetime.timedelta(hours=24)
+    ).order_by(MoodCheckin.timestamp.asc()).all()
 
-    if checkin:
-        return jsonify({"hasCheckedIn": True, "mood": checkin.mood})
+    if checkins:
+        # Latest mood entry
+        latest = checkins[-1]
+        history = [{
+            "mood": c.mood,
+            "intensity": c.intensity,
+            "timestamp": c.timestamp.isoformat()
+        } for c in checkins]
+        
+        return jsonify({
+            "hasCheckedIn": has_checked_in or len(checkins) > 0, 
+            "count": len(checkins),
+            "latest": {
+                "mood": latest.mood,
+                "intensity": latest.intensity,
+                "timestamp": latest.timestamp.isoformat()
+            },
+            "allCheckins": history
+        })
     else:
-        return jsonify({"hasCheckedIn": False})
+        return jsonify({
+            "hasCheckedIn": has_checked_in, 
+            "count": 0, 
+            "allCheckins": []
+        })
 
 @api_bp.route('/mood-checkin', methods=['POST'])
 @jwt_required()
 def add_mood_checkin():
-    """Adds a mood check-in for the current user, if one for today doesn't exist."""
+    """Adds a detailed mood check-in for the current user."""
     user_id = get_jwt_identity()
-    
-    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
-    today_end = datetime.datetime.combine(datetime.date.today(), datetime.time.max)
-    existing_checkin = MoodCheckin.query.filter(
-        MoodCheckin.user_id == user_id,
-        MoodCheckin.timestamp >= today_start,
-        MoodCheckin.timestamp <= today_end
-    ).first()
-
-    if existing_checkin:
-        return jsonify(msg="You have already checked in today."), 409
-
     data = request.get_json()
+    
     mood = data.get('mood')
+    intensity = data.get('intensity', 5)
+    sleep = data.get('sleep_quality')
+    social = data.get('social_interaction', False)
+    energy = data.get('energy_level')
     
     if not mood:
         return jsonify(msg="Mood is required"), 400
 
-    new_checkin = MoodCheckin(user_id=user_id, mood=mood)
+    # Simple Analysis Logic
+    summary_parts = []
+    if mood.lower() in ['sad', 'stressed', 'anxious']:
+        if intensity > 7:
+            summary_parts.append("You seem to be carrying a heavy load right now. Please be gentle with yourself.")
+        else:
+            summary_parts.append("It's okay to not be okay. Acknowledging your feelings is the first step.")
+    elif mood.lower() in ['excellent', 'happy', 'calm']:
+        summary_parts.append("It's wonderful that you're feeling good! Try to soak in this positive moment.")
+    
+    if sleep == 'Poor':
+        summary_parts.append("Rest is so important for mental clarity. Try to prioritize some quiet time today.")
+    
+    if not social:
+        summary_parts.append("Even a small interaction can boost your mood—consider reaching out to someone later.")
+    
+    if energy == 'Low' and mood.lower() == 'stressed':
+        summary_parts.append("Your energy is low while stress is high. A short break or some deep breathing might help.")
+
+    if not summary_parts:
+        summary_parts.append("Thanks for checking in! Monitoring your journey helps in building long-term wellness.")
+
+    analysis_report = " ".join(summary_parts)
+
+    new_checkin = MoodCheckin(
+        user_id=user_id, 
+        mood=mood,
+        intensity=intensity,
+        sleep_quality=sleep,
+        social_interaction=social,
+        energy_level=energy,
+        analysis_report=analysis_report
+    )
     db.session.add(new_checkin)
+
+    # Streak Logic
+    user = User.query.get(user_id)
+    today = datetime.date.today()
+    
+    # Initialize streak_count if it's None
+    if user.streak_count is None:
+        user.streak_count = 0
+        
+    print(f"DEBUG: Streak logic for user {user_id}. last_checkin: {user.last_checkin_date}, today: {today}")
+    
+    if user.last_checkin_date is None:
+        user.streak_count = 1
+        user.last_checkin_date = today
+        print(f"DEBUG: First checkin. Streak set to 1")
+    elif user.last_checkin_date < today:
+        if user.last_checkin_date == today - datetime.timedelta(days=1):
+            user.streak_count += 1
+            print(f"DEBUG: Yesterday checkin found. Streak incremented to {user.streak_count}")
+        else:
+            user.streak_count = 1
+            print(f"DEBUG: Gap in checkin. Streak reset to 1")
+        user.last_checkin_date = today
+    else:
+        print(f"DEBUG: Already checked in today. Streak remains {user.streak_count}")
+    
     db.session.commit()
     
-    return jsonify(msg="Mood saved successfully"), 201
+    return jsonify({
+        "msg": "Mood saved successfully",
+        "analysis": analysis_report,
+        "streak": user.streak_count
+    }), 201
+
+@api_bp.route('/user/streak', methods=['GET'])
+@jwt_required()
+def get_user_streak():
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    # Check if streak should be reset (if they missed yesterday)
+    today = datetime.date.today()
+    print(f"DEBUG: get_user_streak for {user_id}. last_checkin: {user.last_checkin_date}, today: {today}")
+    if user.last_checkin_date and user.last_checkin_date < today - datetime.timedelta(days=1):
+        print(f"DEBUG: Streak reset for {user_id}. last_checkin was {user.last_checkin_date}")
+        user.streak_count = 0
+        db.session.commit()
+        
+    return jsonify({
+        "streak": user.streak_count,
+        "last_checkin": user.last_checkin_date.isoformat() if user.last_checkin_date else None
+    })
 
 @api_bp.route('/mood-history', methods=['GET'])
 @jwt_required()
@@ -1781,6 +1881,11 @@ def get_mood_history():
     
     history = [{
         "mood": c.mood,
+        "intensity": c.intensity,
+        "sleep": c.sleep_quality,
+        "social": c.social_interaction,
+        "energy": c.energy_level,
+        "analysis": c.analysis_report,
         "date": c.timestamp.isoformat()
     } for c in checkins]
     
