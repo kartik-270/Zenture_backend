@@ -131,6 +131,7 @@ class Appointment(db.Model):
     counselor = db.relationship('User', foreign_keys=[counselor_id])
     session_started_at = db.Column(db.DateTime, nullable=True)
     session_ended_at = db.Column(db.DateTime, nullable=True)
+    allow_messaging = db.Column(db.Boolean, default=False)
 
 class Resource(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -205,6 +206,16 @@ class ForumReply(db.Model):
     content = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     author = db.relationship('User', backref='forum_replies')
+
+class PostLike(db.Model):
+    __tablename__ = 'post_like'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey('forum_post.id'), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    
+    # Ensure a user can only like a post once
+    __table_args__ = (db.UniqueConstraint('user_id', 'post_id', name='unique_user_post_like'),)
 
 class Notification(db.Model):
     __tablename__ = 'notification'

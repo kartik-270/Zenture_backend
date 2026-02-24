@@ -11,6 +11,7 @@ from models import (
 )
 from extensions import mail
 from followupquestions import FOLLOW_UP_QUESTIONS
+from inference.safety import is_crisis as check_crisis, CRISIS_RESPONSE
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, get_jwt, get_jwt_header
 from functools import wraps
 import datetime
@@ -23,40 +24,23 @@ import shutil
 import base64
 from flask_mail import Message
 import requests
+import torch
+import threading
+from transformers import TextIteratorStreamer
+from flask import Response
+import json
 
 api_bp = Blueprint('api', __name__)
 CORS(api_bp, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True) # Enable CORS for all routes in this blueprint
 
-MODELS = {
-    "LISTENER": None,
-    "RESPONDER": None,
-    "EMOTION": None,
-    "SENTIMENT": None
-}
+# AI Models are now handled by the standalone inference_server.py on port 5001
+INFERENCE_API_URL = os.getenv("INFERENCE_API_URL", "http://localhost:5001/generate")
 
 def get_chatbot_models():
-    """Lazy-loads models only when needed."""
-    if MODELS["LISTENER"] is None:
-        from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
-        from peft import PeftModel
-        
-        print("Loading models into memory...")
-        # Load Listener
-        MODELS["LISTENER"] = pipeline("text-classification", model="./listener_model", tokenizer="./listener_model")
-        
-        # Load Responder (LoRA)
-        base_model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-medium")
-        model = PeftModel.from_pretrained(base_model, "./responder_model")
-        tokenizer = AutoTokenizer.from_pretrained("./responder_model")
-        MODELS["RESPONDER"] = pipeline("text-generation", model=model, tokenizer=tokenizer)
-        
-        # Load Analytics
-        MODELS["EMOTION"] = pipeline("text-classification", model="bhadresh-savani/bert-base-uncased-emotion", return_all_scores=True)
-        MODELS["SENTIMENT"] = pipeline("text-classification", model="distilbert-base-uncased-finetuned-sst-2-english")
-        
-    return MODELS
+    """No longer loads models locally to save memory."""
+    return None
 
-CRISIS_RESPONSE = "I'm so sorry you're going through this. Please know that help is available. You can connect with someone immediately by calling 988 in the US or finding a local crisis hotline. Your life is important, and support is available."
+# CRISIS_RESPONSE is now imported from inference.safety
 
 @api_bp.route('/test-email', methods=['GET'])
 def test_email_config():
@@ -149,19 +133,36 @@ def send_with_maileroo(to_email, subject, body_text):
         print("Maileroo error:", str(e))
         return False
 
+def save_to_chat_history(user_id, conversation_id, user_msg, bot_msg, is_crisis=False, intent="General", sentiment=0.5, emotion="neutral"):
+    """Helper to save chat interaction to persistent history."""
+    if not user_id:
+        return
+    try:
+        user_entry = ChatHistory(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            sender='user',
+            message=user_msg,
+            emotion=emotion,
+            sentiment_score=sentiment,
+            intent=intent,
+            is_crisis=is_crisis
+        )
+        bot_entry = ChatHistory(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            sender='bot',
+            message=bot_msg
+        )
+        db.session.add_all([user_entry, bot_entry])
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"Failed to save history: {e}")
 
 @api_bp.route('/chatbot', methods=['POST'])
 def chatbot_endpoint():
-    # 1. Initialize models using lazy loader (prevents Port Not Found error)
-    models = get_chatbot_models()
-    
-    # 2. Safety check: Ensure models are ready
-    if not models["LISTENER"] or not models["RESPONDER"]:
-        return jsonify(
-            response="The chatbot models are currently initializing. Please try again in a few seconds.", 
-            followUps=[], 
-            conversation_id=None
-        ), 503
+    # Model check is now done by attempting to connect to the inference server
 
     # 3. Identify user from JWT (if provided)
     user_id = None
@@ -179,20 +180,9 @@ def chatbot_endpoint():
     if not user_input:
         return jsonify(response="Please provide a message.", followUps=[], conversation_id=conversation_id), 400
 
-    # 4. Analytics: Emotion & Sentiment Detection
+    # Analytics are now handled by the inference server
     emotion_label = 'neutral'
     sentiment_score = 0.5
-    try:
-        if models["EMOTION"]:
-            raw_emotions = models["EMOTION"](user_input)
-            emotions = raw_emotions[0] if isinstance(raw_emotions[0], list) else raw_emotions
-            emotion_label = max(emotions, key=lambda x: x['score'])['label']
-        
-        if models["SENTIMENT"]:
-            sentiment_res = models["SENTIMENT"](user_input)[0]
-            sentiment_score = 1.0 if sentiment_res['label'] == 'POSITIVE' else 0.0
-    except Exception as e:
-        print(f"Analytics model error: {e}")
 
     # 5. Track or Start Session in Database
     try:
@@ -205,17 +195,13 @@ def chatbot_endpoint():
         db.session.rollback()
         print(f"Session tracking error: {e}")
 
-    # 6. Step 1: Listener Model (Classification)
-    try:
-        analysis_result = models["LISTENER"](user_input)[0]
-        predicted_label = analysis_result['label']
-        confidence_score = analysis_result['score']
-    except Exception as e:
-        print(f"Listener model error: {e}")
-        return jsonify(response="I'm having trouble understanding. Could you rephrase?", followUps=[], conversation_id=conversation_id), 500
+    # Risk Detection / Crisis Handling requires simple check first
+    # We will let the inference server handle the detailed classification
+    predicted_label = "General"
+    confidence_score = 1.0
 
     # 7. Risk Detection / Crisis Handling
-    is_crisis = predicted_label == "Suicidal" and confidence_score > 0.8
+    is_crisis = check_crisis(user_input, predicted_label, confidence_score)
     if is_crisis:
         bot_response = CRISIS_RESPONSE
         if user_id:
@@ -233,71 +219,94 @@ def chatbot_endpoint():
                 print(f"Failed to save crisis history: {e}")
         return jsonify(response=bot_response, followUps=[], conversation_id=conversation_id), 200
 
-    # 8. Retrieve Conversation History for Context
-    prompt_history = ""
-    if user_id:
-        conversation_history = ChatHistory.query.filter_by(
-            user_id=user_id,
-            conversation_id=conversation_id
-        ).order_by(ChatHistory.timestamp.asc()).all()
-        
-        lookback_window = 6
-        for turn in conversation_history[-lookback_window:]:
-             prompt_history += f"<{turn.sender}> {turn.message} "
-
-    # 9. Step 2: Generate Response with Responder Model
+    # 9. Step 2: Generate Response with Responder Model (Llama-3.2)
     try:
-        tone_instruction = "(Be warm and professional)"
-        if sentiment_score < 0.3:
-            tone_instruction = "(Be empathetic and supportive)"
-        elif sentiment_score > 0.7:
-            tone_instruction = "(Be encouraging and positive)"
-            
-        few_shot_examples = (
-            "User: I'm feeling really down today.\nCounselor: I'm sorry to hear that. I'm here to listen.\n"
-            "User: I'm having a panic attack.\nCounselor: Take a deep breath. You are safe.\n"
-        )
+        # Detect if user is specifically asking for help/tips vs sharing a feeling
+        help_keywords = ["help", "advice", "tip", "strategy", "cope", "how", "what", "steps", "method", "guide"]
+        is_request = any(kw in user_input.lower() for kw in help_keywords)
         
-        full_prompt = (
-            f"Instruction: You are a compassionate mental health counselor. {tone_instruction}\n"
-            f"{few_shot_examples}\n"
-            f"User's status: {predicted_label}.\n"
-            f"{prompt_history}User: {user_input}\nCounselor:"
-        )
-
-        response = models["RESPONDER"](
-            full_prompt, 
-            max_new_tokens=60, 
-            do_sample=True, 
-            top_k=50, 
-            top_p=0.9,
-            temperature=0.7,
-            repetition_penalty=1.2,
-            pad_token_id=models["RESPONDER"].tokenizer.eos_token_id,
-            eos_token_id=models["RESPONDER"].tokenizer.eos_token_id
-        )
-
-        generated_text = response[0]['generated_text']
-        
-        # Extract response after the last 'Counselor:' tag
-        if "Counselor:" in generated_text:
-            bot_response = generated_text.split("Counselor:")[-1].strip()
+        # Dynamic Prompting based on Intent
+        if predicted_label in ["Stress", "Anxiety", "Sadness"]:
+            if is_request:
+                objective = (
+                    "You are a solution-focused assistant. "
+                    "Provide DIRECT, PRACTICAL advice immediately. "
+                    "Start with a helpful opening and a numbered list of strategies."
+                )
+                force_start = "I'd be happy to share some strategies with you. Here are some practical steps:\n1. "
+            else:
+                objective = (
+                    "You are an empathetic counselor. Validate the user's emotions warmth and empathy. "
+                    "After validating, offer a few gentle, practical tips to help them feel better."
+                )
+                force_start = "I'm sorry to hear you're feeling that way. It's completely valid to feel this way. To help you manage this, here are a few things you can try:\n1. "
         else:
-            bot_response = generated_text.replace(full_prompt, "").strip()
+            objective = "You are a professional and empathetic counselor. Respond warmly and validate emotions."
+            force_start = ""
 
-        # Clean hallucinations/artifacts
-        stop_markers = ["User:", "System:", "<user>", "<bot>", "\n", "Counselor:"]
-        for marker in stop_markers:
-            bot_response = bot_response.split(marker)[0].strip()
+        sys_prompt = (
+            f"You are Zenture, a professional and empathetic mental health counselor. {objective} "
+            "STRICT PERSONA RULES: 1. You are an AI assistant, not a human. Never invent personal life stories, family, or pets (e.g., do not say 'my dog died' or 'I have a kids'). 2. Focus entirely on the user's feelings. "
+            "LANGUAGE RULES: Auto-detect the language of the user's message and ALWAYS respond in that EXACT same language (Hindi, Tamil, Spanish, French, Telugu, etc.). "
+            "Never switch back to English unless the user does. Maintain quality and empathy in all languages. "
+            "FORMATTING: Keep responses structured, use a friendly tone with emojis."
+        )
         
-        follow_ups = []
-        if sentiment_score < 0.2:
-            if "Counselor" not in bot_response and "session" not in bot_response:
-                bot_response += " If you're feeling overwhelmed, speaking with a professional might help. You can book a confidential session here."
-            follow_ups.append("Book a Counselor Session")
+        # Format conversation history into Llama-3 Instruct blocks
+        formatted_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{sys_prompt}<|eot_id|>"
         
-        if not bot_response:
-            bot_response = "I'm here for you. I'm listening."
+        if user_id:
+            conversation_history = ChatHistory.query.filter_by(
+                user_id=user_id,
+                conversation_id=conversation_id
+            ).order_by(ChatHistory.timestamp.asc()).all()
+            
+            lookback_window = 15  # Maintained as requested
+            for turn in conversation_history[-lookback_window:]:
+                role = "user" if turn.sender == 'user' else "assistant"
+                formatted_prompt += f"<|start_header_id|>{role}<|end_header_id|>\n\n{turn.message}<|eot_id|>"
+        
+        # Add current user input and assistant start
+        formatted_prompt += f"<|start_header_id|>user<|end_header_id|>\n\n{user_input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+
+        # Prepare request for standalone inference server
+        payload = {
+            "prompt": user_input,
+            "sys_prompt": sys_prompt,
+            "history_prompt": formatted_prompt.replace(f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{sys_prompt}<|eot_id|>", "")
+        }
+
+        def generate_proxy_stream():
+            try:
+                with requests.post(INFERENCE_API_URL, json=payload, stream=True, timeout=120) as r:
+                    for line in r.iter_lines():
+                        if line:
+                            decoded_line = line.decode('utf-8')
+                            yield f"{decoded_line}\n\n"
+                            
+                            # Intercept final message to save metadata and history
+                            if decoded_line.startswith("data: {"):
+                                try:
+                                    json_data = json.loads(decoded_line[6:])
+                                    if json_data.get('final'):
+                                        # Save results to DB
+                                        f_response = json_data.get('full_response')
+                                        p_label = json_data.get('predicted_label', 'General')
+                                        s_score = json_data.get('sentiment_score', 0.5)
+                                        e_label = json_data.get('emotion_label', 'neutral')
+                                        i_crisis = check_crisis(user_input, p_label, 1.0) # Check crisis with returned label
+                                        
+                                        save_to_chat_history(user_id, conversation_id, user_input, f_response, i_crisis, p_label, s_score, e_label)
+                                except Exception as e:
+                                    print(f"Error parsing final chunk in proxy: {e}")
+            except Exception as e:
+                print(f"Inference server connection error: {e}")
+                yield f"data: {json.dumps({'chunk': 'I am having trouble connecting to my brain service. Please ensure the inference server is running.'})}\n\n"
+
+        response = Response(generate_proxy_stream(), mimetype='text/event-stream')
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['X-Accel-Buffering'] = 'no'
+        return response
 
     except Exception as e:
         print(f"Responder model error: {e}")
@@ -330,8 +339,20 @@ def chatbot_endpoint():
     # ... save to history and return ...
 
 @api_bp.route('/chatbot/feedback', methods=['POST'])
-@jwt_required()
 def save_chatbot_feedback():
+    # Attempt to get user identity if token exists, but don't require it
+    user_id = None
+    try:
+        from flask_jwt_extended import decode_token
+        auth_header = request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
+            if token and token != 'null':
+                decoded = decode_token(token)
+                user_id = decoded.get('sub')
+    except Exception:
+        pass
+
     data = request.get_json()
     conversation_id = data.get('conversation_id')
     score = data.get('score')
@@ -350,8 +371,20 @@ def save_chatbot_feedback():
     return jsonify(msg="Feedback saved successfully"), 200
 
 @api_bp.route('/chatbot/session/end', methods=['POST'])
-@jwt_required()
 def end_chatbot_session():
+    # Attempt to get user identity if token exists, but don't require it
+    user_id = None
+    try:
+        from flask_jwt_extended import decode_token
+        auth_header = request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
+            if token and token != 'null':
+                decoded = decode_token(token)
+                user_id = decoded.get('sub')
+    except Exception:
+        pass
+
     data = request.get_json()
     conversation_id = data.get('conversation_id')
     
@@ -438,9 +471,14 @@ def forgot_password_request():
     # 1. Check if user exists with this email
     user = None
     for u in User.query.all():
-        if u.email_hash and bcrypt.check_password_hash(u.email_hash, email):
-            user = u
-            break
+        if u.email_hash:
+            try:
+                if bcrypt.check_password_hash(u.email_hash, email):
+                    user = u
+                    break
+            except ValueError:
+                # If email_hash is not a valid hash, skip it
+                continue
     
     if not user:
         # Security: Don't reveal if user exists
@@ -515,9 +553,14 @@ def forgot_password_reset():
     # 2. Find User and Update Password
     user = None
     for u in User.query.all():
-        if u.email_hash and bcrypt.check_password_hash(u.email_hash, email):
-            user = u
-            break
+        if u.email_hash:
+            try:
+                if bcrypt.check_password_hash(u.email_hash, email):
+                    user = u
+                    break
+            except ValueError:
+                # If email_hash is not a valid hash, skip it
+                continue
             
     if not user:
          return jsonify(msg="User not found."), 404
@@ -965,7 +1008,7 @@ def get_upcoming_appointments():
         appointments_list = [
             {
                 "student_username": user.username,
-                "appointment_time": appointment.appointment_time.isoformat()
+                "appointment_time": (appointment.appointment_time + timedelta(hours=5, minutes=30)).isoformat()
             }
             for appointment, user in upcoming_appointments
         ]
@@ -1350,7 +1393,10 @@ def book_appointment():
     try:
         # Combine date and time strings and parse into a single datetime object
         combined_dt_str = f"{appointment_date_str} {appointment_time_str}"
-        appointment_time = dt.strptime(combined_dt_str, "%Y-%m-%d %H:%M")
+        # Parse as IST (local) and convert to UTC
+        local_time = dt.strptime(combined_dt_str, "%Y-%m-%d %H:%M")
+        # Assuming the app is used in IST (+5:30)
+        appointment_time = local_time - datetime.timedelta(hours=5, minutes=30)
     except ValueError:
         return jsonify({"error": "Invalid date or time format."}), 400
 
@@ -1388,8 +1434,8 @@ def book_appointment():
         "message": "Appointment confirmed!",
         "appointment": {
             "counselor": counselor.username,
-            "date": appointment_time.strftime("%Y-%m-%d"),
-            "time": appointment_time.strftime("%H:%M"),
+            "date": local_time.strftime("%Y-%m-%d"),
+            "time": local_time.strftime("%H:%M"),
             "mode": mode,
             "description": description,
             "status": new_appointment.status,
@@ -1594,7 +1640,7 @@ def get_appointments():
         "id": a.id,
         "student_id": a.student_id,
         "counselor_id": a.counselor_id,
-        "appointment_time": a.appointment_time.isoformat(),
+        "appointment_time": (a.appointment_time + timedelta(hours=5, minutes=30)).isoformat(),
         "status": a.status,
         "mode": a.mode,
         "meeting_link": a.meeting_link
@@ -1825,19 +1871,19 @@ def get_counselor_profile(profile_id):
     if not counselor_profile:
         return jsonify({"error": "Counselor not found"}), 404
 
-    # Calculate start and end of the day for the query
-    start_of_day = dt.combine(date_obj, datetime.time.min)
-    end_of_day = dt.combine(date_obj, datetime.time.max)
+    # Calculate start and end of the day for the query (Convert IST bounds to UTC)
+    start_of_day_utc = dt.combine(date_obj, datetime.time.min) - timedelta(hours=5, minutes=30)
+    end_of_day_utc = dt.combine(date_obj, datetime.time.max) - timedelta(hours=5, minutes=30)
     
     # Fetch existing appointments (booked or pending)
     booked_appointments = Appointment.query.filter(
         Appointment.counselor_id == counselor_profile.user_id, 
-        Appointment.appointment_time.between(start_of_day, end_of_day),
+        Appointment.appointment_time.between(start_of_day_utc, end_of_day_utc),
         Appointment.status.in_(['booked', 'pending'])
     ).all()
 
-    # Set of booked times strings
-    booked_times = {appt.appointment_time.strftime("%H:%M") for appt in booked_appointments}
+    # Set of booked times strings (Convert UTC back to IST for local matching)
+    booked_times = {(appt.appointment_time + timedelta(hours=5, minutes=30)).strftime("%H:%M") for appt in booked_appointments}
 
     # Custom Availability Logic
     avail = counselor_profile.availability or {}
@@ -1906,7 +1952,7 @@ def get_student_dashboard_data():
             appointments_data.append({
                 'id': appt.id,
                 'counsellorName': counsellor.username,
-                'date': appt.appointment_time.isoformat(),
+                'date': (appt.appointment_time + timedelta(hours=5, minutes=30)).isoformat(),
                 'mode': appt.mode,
                 'status': appt.status,
                 'meeting_link': appt.meeting_link
@@ -1959,7 +2005,7 @@ def get_counsellor_dashboard_data():
             appointments_data.append({
                 'id': appt.id,
                 'studentName': student.username,
-                'date': appt.appointment_time.isoformat(),
+                'date': (appt.appointment_time + timedelta(hours=5, minutes=30)).isoformat(),
                 'mode': appt.mode,
                 'status': appt.status,
                 'meeting_link': appt.meeting_link,
@@ -2110,16 +2156,24 @@ def verify_session_access(session_id):
         return jsonify({"allowed": False, "error": "Invalid session or unauthorized."}), 403
     
     # Time Limit Check
-    now = dt.now()
+    now = dt.utcnow()
     appointment_time = appointment.appointment_time
     
     # If appointment_time is string (some DB adapters), parse it. 
     # SQLAlchemy usually returns datetime object.
     
+    # If the session is more than 45 minutes past its scheduled time, it's expired.
+    # (30 mins duration + 15 mins buffer)
+    if now > appointment_time + timedelta(minutes=45):
+        if appointment.status == 'pending':
+            appointment.status = 'rejected'
+            db.session.commit()
+        return jsonify({"allowed": False, "error": "This session has already expired."}), 403
+
     # Allow joining 10 mins before
     start_window = appointment_time - timedelta(minutes=10)
-    # Session duration 30 mins (allow up to 30 mins after start)
-    end_window = appointment_time + timedelta(minutes=30)
+    # Allow up to 45 mins after start
+    end_window = appointment_time + timedelta(minutes=45)
     
     if now < start_window:
         wait_time = (start_window - now).total_seconds() / 60
@@ -2131,13 +2185,28 @@ def verify_session_access(session_id):
     return jsonify({
         "allowed": True, 
         "mode": appointment.mode,
-        "startTime": appointment_time.isoformat(),
+        "appointment_id": appointment.id,
+        "startTime": appointment_time.isoformat() + 'Z',
         "user": {
             "id": user.id,
             "name": user.username,
             "role": user.role.value
         }
     })
+
+@api_bp.route('/appointments/<int:appt_id>/messaging-permission', methods=['PUT'])
+@jwt_required()
+def set_messaging_permission(appt_id):
+    user_id = get_jwt_identity()
+    appointment = Appointment.query.get(appt_id)
+    
+    if not appointment or appointment.student_id != user_id:
+        return jsonify({"msg": "Unauthorized"}), 403
+        
+    data = request.json
+    appointment.allow_messaging = data.get('allow_messaging', True)
+    db.session.commit()
+    return jsonify({"msg": "Permission updated"}), 200
 
 # --- COUNSELOR DASHBOARD: CLIENTS ---
 
@@ -2200,6 +2269,20 @@ def get_conversations():
     
     contact_ids = set([r[0] for r in sent_to.all()] + [r[0] for r in received_from.all()])
     
+    # Also include counselors if they have an appointment with allow_messaging=True
+    permitted_appointments = Appointment.query.filter(
+        (Appointment.student_id == current_user_id) & (Appointment.allow_messaging == True)
+    ).all()
+    for appt in permitted_appointments:
+        contact_ids.add(appt.counselor_id)
+    
+    # Also include students for the counselor side
+    permitted_as_counselor = Appointment.query.filter(
+        (Appointment.counselor_id == current_user_id) & (Appointment.allow_messaging == True)
+    ).all()
+    for appt in permitted_as_counselor:
+        contact_ids.add(appt.student_id)
+    
     conversations = []
     for uid in contact_ids:
         contact = User.query.get(uid)
@@ -2216,7 +2299,7 @@ def get_conversations():
                 "user": {"id": contact.id, "name": contact.username, "role": contact.role.value},
                 "last_message": last_msg.content[:50] + "..." if last_msg else "",
                 "timestamp": last_msg.timestamp.isoformat() if last_msg else None,
-                "unread": unread_count
+                "unread_count": unread_count
             })
             
     # Sort by timestamp desc
@@ -2240,7 +2323,8 @@ def get_messages(user_id):
             "receiver_id": m.receiver_id,
             "content": m.content,
             "timestamp": m.timestamp.isoformat(),
-            "is_read": m.is_read
+            "is_read": m.is_read,
+            "is_sender": m.sender_id == current_user_id
         } for m in messages
     ]), 200
 
@@ -2376,7 +2460,7 @@ def get_client_details(student_id):
             "email": student.email_hash
         },
         "notes": [{"id": n.id, "content": n.note, "timestamp": n.timestamp.isoformat()} for n in notes],
-        "appointments": [{"id": a.id, "date": a.appointment_time.isoformat(), "status": a.status, "mode": a.mode} for a in appointments]
+        "appointments": [{"id": a.id, "date": a.appointment_time.isoformat(), "status": a.status, "mode": a.mode, "notes": getattr(a, 'notes', '')} for a in appointments]
     }), 200
 
 

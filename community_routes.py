@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from flask_cors import CORS
-from models import db, User, UserRole, Community, CommunityMember, ForumPost, ForumReply, ChatMessage
+from models import db, User, UserRole, Community, CommunityMember, ForumPost, ForumReply, PostLike, ChatMessage, Notification
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from routes import roles_required
 import datetime
@@ -184,54 +184,33 @@ def add_post_reply(post_id):
 
     return jsonify({"msg": "Reply added successfully"}), 201
 
-# --- Direct Messaging ---
+# --- Post Likes ---
 
-@community_bp.route('/messages/direct/<int:other_user_id>', methods=['GET'])
+@community_bp.route('/posts/<int:post_id>/like', methods=['POST'])
 @jwt_required()
-def get_direct_messages(other_user_id):
+def like_post(post_id):
     user_id = int(get_jwt_identity())
+    post = ForumPost.query.get(post_id)
+    if not post:
+        return jsonify({"msg": "Post not found"}), 404
     
-    messages = ChatMessage.query.filter(
-        db.or_(
-            db.and_(ChatMessage.sender_id == user_id, ChatMessage.receiver_id == other_user_id),
-            db.and_(ChatMessage.sender_id == other_user_id, ChatMessage.receiver_id == user_id)
-        )
-    ).order_by(ChatMessage.timestamp.asc()).all()
+    existing_like = PostLike.query.filter_by(user_id=user_id, post_id=post_id).first()
+    
+    if existing_like:
+        # Unlike
+        db.session.delete(existing_like)
+        post.likes_count = max(0, (post.likes_count or 1) - 1)
+        db.session.commit()
+        return jsonify({"msg": "Post unliked", "likes_count": post.likes_count, "liked": False}), 200
+    else:
+        # Like
+        new_like = PostLike(user_id=user_id, post_id=post_id)
+        db.session.add(new_like)
+        post.likes_count = (post.likes_count or 0) + 1
+        db.session.commit()
+        return jsonify({"msg": "Post liked", "likes_count": post.likes_count, "liked": True}), 200
 
-    result = []
-    for m in messages:
-        result.append({
-            "id": m.id,
-            "sender_id": m.sender_id,
-            "receiver_id": m.receiver_id,
-            "content": m.content,
-            "timestamp": m.timestamp.isoformat()
-        })
-    return jsonify(result), 200
-
-@community_bp.route('/messages/direct/<int:other_user_id>', methods=['POST'])
-@jwt_required()
-def send_direct_message(other_user_id):
-    user_id = int(get_jwt_identity())
-    user = User.query.get(user_id)
-    if getattr(user, 'is_blocked', False):
-         return jsonify({"msg": "You are blocked from messaging"}), 403
-
-    data = request.get_json()
-    content = data.get('content')
-
-    if not content:
-        return jsonify({"msg": "Content is required"}), 400
-
-    other_user = User.query.get(other_user_id)
-    if not other_user:
-        return jsonify({"msg": "User not found"}), 404
-
-    new_message = ChatMessage(sender_id=user_id, receiver_id=other_user_id, content=content)
-    db.session.add(new_message)
-    db.session.commit()
-
-    return jsonify({"msg": "Message sent"}), 201
+# --- Moderation ---
 
 @community_bp.route('/communities/<int:community_id>', methods=['DELETE'])
 @roles_required('admin')
