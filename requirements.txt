@@ -9,16 +9,7 @@ psycopg2-binary
 Flask-Mail
 gunicorn
 Flask-SocketIO
-Flask-APScheduler
-transformers
-agora-token-builder
-torch
-datasets
-scikit-learn
-numpy
 eventlet
-accelerate
+agora-token-builder
 requests
-huggingface_hub
-gradio
 cloudinary
