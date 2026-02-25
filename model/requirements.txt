@@ -1,5 +1,10 @@
 torch
 datasets
 transformers
+peft
+accelerate
+bitsandbytes
 scikit-learn
 numpy
+tqdm
+sentencepiece

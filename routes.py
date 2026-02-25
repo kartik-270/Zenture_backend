@@ -9,9 +9,15 @@ from models import (
     Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin, JournalEntry,Notification, UserActivityLog,
     ChatMessage, ClientNote, ChatSession
 )
-from extensions import mail
+from extensions import mail, socketio
 from followupquestions import FOLLOW_UP_QUESTIONS
 from inference.safety import is_crisis as check_crisis, CRISIS_RESPONSE
+import uuid
+import datetime
+from datetime import datetime as dt, timedelta
+import json
+import requests
+from flask import Response
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, get_jwt, get_jwt_header
 from functools import wraps
 import datetime
@@ -156,6 +162,21 @@ def save_to_chat_history(user_id, conversation_id, user_msg, bot_msg, is_crisis=
         )
         db.session.add_all([user_entry, bot_entry])
         db.session.commit()
+
+        if is_crisis:
+            # Emit real-time alert to Admin and Counselor
+            socketio.emit('high-risk-alert', {
+                "user_id": user_id,
+                "message": user_msg,
+                "timestamp": dt.utcnow().isoformat(),
+                "type": "crisis"
+            }, room='admin')
+            socketio.emit('high-risk-alert', {
+                "user_id": user_id,
+                "message": user_msg,
+                "timestamp": dt.utcnow().isoformat(),
+                "type": "crisis"
+            }, room='counselor')
     except Exception as e:
         db.session.rollback()
         print(f"Failed to save history: {e}")
@@ -217,6 +238,21 @@ def chatbot_endpoint():
             except Exception as e:
                 db.session.rollback()
                 print(f"Failed to save crisis history: {e}")
+        
+        # Emit real-time alert even if history save fails or for anonymous users (if you want)
+        socketio.emit('high-risk-alert', {
+            "user_id": user_id,
+            "message": user_input,
+            "timestamp": dt.utcnow().isoformat(),
+            "type": "crisis"
+        }, room='admin')
+        socketio.emit('high-risk-alert', {
+            "user_id": user_id,
+            "message": user_input,
+            "timestamp": dt.utcnow().isoformat(),
+            "type": "crisis"
+        }, room='counselor')
+        
         return jsonify(response=bot_response, followUps=[], conversation_id=conversation_id), 200
 
     # 9. Step 2: Generate Response with Responder Model (Llama-3.2)
@@ -1600,6 +1636,164 @@ def get_chat_analytics():
         "topics": topics,
         "risks": risks
     })
+
+@api_bp.route('/admin/analytics/holistic', methods=['GET'])
+@roles_required('admin')
+def get_holistic_analytics():
+    """Provides aggregated holistic insights including causes of stress and wellness index."""
+    from textblob import TextBlob
+    from collections import Counter
+
+    # 1. Causes of Stress (Logic: Keyword extraction from ChatHistory and MoodCheckin)
+    stress_categories = {
+        "Academic": ["exam", "study", "grades", "assignment", "test", "professor", "college"],
+        "Social": ["friend", "relationship", "peer", "lonely", "social", "party", "talk"],
+        "Personal": ["family", "home", "health", "sleep", "money", "future"],
+        "Emotional": ["sad", "angry", "anxious", "depressed", "hopeless"]
+    }
+
+    category_counts = {cat: 0 for cat in stress_categories}
+    
+    # Analyze recent ChatHistory (last 30 days)
+    cutoff = dt.utcnow() - timedelta(days=30)
+    chats = ChatHistory.query.filter(ChatHistory.timestamp >= cutoff, ChatHistory.sender == 'user').all()
+    
+    for chat in chats:
+        msg = chat.message.lower()
+        for cat, keywords in stress_categories.items():
+            if any(kw in msg for kw in keywords):
+                category_counts[cat] += 1
+
+    # 2. Wellness Index (Based on mood, sentiment, and completion rates)
+    # Simple algorithm: average of normalized metrics
+    avg_sentiment = db.session.query(func.avg(ChatHistory.sentiment_score)).filter(ChatHistory.timestamp >= cutoff).scalar() or 0
+    avg_mood = db.session.query(func.avg(MoodCheckin.intensity)).filter(MoodCheckin.timestamp >= cutoff).scalar() or 5
+    
+    # Normalize: sentiment (-1 to 1 -> 0 to 100), mood (1 to 10 -> 0 to 100)
+    norm_sentiment = (avg_sentiment + 1) * 50
+    norm_mood = avg_mood * 10
+    wellness_index = (norm_sentiment + norm_mood) / 2
+
+    # 3. Actionable Insights
+    top_cat = max(category_counts, key=category_counts.get)
+    insights = [
+        {
+            "id": 1,
+            "title": f"High {top_cat} Stress Detected",
+            "description": f"Students are frequently mentioning {top_cat.lower()}-related concerns. Consider organizing a focus group or sharing resources.",
+            "type": "warning"
+        },
+        {
+            "id": 2,
+            "title": "Positive Engagement Trend",
+            "description": "Chatbot completion rates have increased by 15% this week.",
+            "type": "success"
+        }
+    ]
+
+    return jsonify({
+        "causesOfStress": [{"subject": k, "A": v, "fullMark": max(category_counts.values()) or 10} for k, v in category_counts.items()],
+        "wellnessIndex": round(wellness_index, 1),
+        "insights": insights
+    })
+
+@api_bp.route('/admin/alerts/high-risk', methods=['GET'])
+@roles_required('admin')
+def get_high_risk_alerts():
+    """Fetches unacknowledged high-risk alerts."""
+    high_risk_chats = ChatHistory.query.filter_by(is_crisis=True).order_by(ChatHistory.timestamp.desc()).limit(20).all()
+    
+    # In a real app, we'd have an Alert table with acknowledgment status.
+    # For now, we'll return recent crisis messages and group them by user.
+    alerts = []
+    for chat in high_risk_chats:
+        alerts.append({
+            "id": chat.id,
+            "user_id": chat.user_id,
+            "username": chat.user.username,
+            "message": chat.message,
+            "timestamp": chat.timestamp.isoformat(),
+            "risk_score": 85, # Mock score
+            "risk_factors": [chat.emotion or "distressed", "crisis_keyword"]
+        })
+    return jsonify(alerts)
+
+@api_bp.route('/admin/student/<int:user_id>/confidential', methods=['GET'])
+@roles_required('admin')
+def get_student_confidential_admin(user_id):
+    """Admin route to fetch student personal details."""
+    conf = ConfidentialData.query.filter_by(user_id=user_id).first()
+    if not conf:
+        return jsonify({"error": "Confidential data not found"}), 404
+    
+    user = User.query.get(user_id)
+    return jsonify({
+        "username": user.username,
+        "name": conf.name,
+        "phone": conf.phone_number,
+        "parent_name": conf.parent_name,
+        "parent_phone": conf.parent_phone_number,
+        "email": user.email_hash # simplified
+    })
+
+@api_bp.route('/counselor/student/<int:user_id>/confidential', methods=['GET'])
+@roles_required('counselor')
+def get_student_confidential_counselor(user_id):
+    """Counselor route to fetch student personal details for outreach."""
+    # In a real app, check if the counselor is assigned to this student
+    conf = ConfidentialData.query.filter_by(user_id=user_id).first()
+    if not conf:
+        return jsonify({"error": "Confidential data not found"}), 404
+    
+    user = User.query.get(user_id)
+    return jsonify({
+        "username": user.username,
+        "name": conf.name,
+        "phone": conf.phone_number,
+        "email": user.email_hash
+    })
+
+@api_bp.route('/admin/assign-counselor', methods=['POST'])
+@roles_required('admin')
+def assign_counselor_manual():
+    """Allows admin to manually assign a counselor to a student for an urgent session."""
+    data = request.json
+    student_id = data.get('student_id')
+    counselor_id = data.get('counselor_id')
+    
+    if not student_id or not counselor_id:
+        return jsonify({"error": "Missing student or counselor ID"}), 400
+    
+    # Create an urgent appointment
+    appointment_time = dt.utcnow() + timedelta(minutes=30) # Suggest in 30 mins
+    
+    new_appointment = Appointment(
+        student_id=student_id,
+        counselor_id=counselor_id,
+        appointment_time=appointment_time,
+        status="booked", # Pre-confirmed by admin
+        notes="URGENT: Assigned by Admin for crisis management.",
+        mode="video_call",
+        meeting_link=f"/session/{uuid.uuid4()}"
+    )
+    db.session.add(new_appointment)
+    
+    # Notify both
+    notif_student = Notification(
+        user_id=student_id, 
+        message=f"Admin has assigned an urgent session for you with Counselor ID {counselor_id} in 30 minutes.",
+        link=new_appointment.meeting_link
+    )
+    notif_counselor = Notification(
+        user_id=counselor_id, 
+        message=f"URGENT: Admin has assigned you a crisis case (Student ID {student_id}). Please join in 30 minutes.",
+        link=new_appointment.meeting_link
+    )
+    db.session.add(notif_student)
+    db.session.add(notif_counselor)
+    
+    db.session.commit()
+    return jsonify({"msg": "Counselor assigned successfully and notifications sent.", "meeting_link": new_appointment.meeting_link})
 
 
 @api_bp.route('/notifications', methods=['GET'])

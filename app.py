@@ -6,13 +6,11 @@ from flask import Flask, send_from_directory
 from flask_cors import CORS
 
 from config import Config
-from extensions import db, bcrypt, migrate, jwt, mail
+from extensions import db, bcrypt, migrate, jwt, mail, socketio
 from routes import api_bp
 
-from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_socketio import emit, join_room, leave_room
 import os
-
-socketio = SocketIO()
 
 def create_app():
     app = Flask(__name__)
