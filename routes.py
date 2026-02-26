@@ -7,7 +7,7 @@ from werkzeug.utils import secure_filename
 from models import (
     db, User, UserRole, VerificationCode, ConfidentialData, 
     Resource, CounselorProfile, Appointment, ForumPost, ForumReply, bcrypt, ChatHistory, MoodCheckin, JournalEntry,Notification, UserActivityLog,
-    ChatMessage, ClientNote, ChatSession
+    ChatMessage, ClientNote, ChatSession, AssessmentResult
 )
 from extensions import mail, socketio
 from followupquestions import FOLLOW_UP_QUESTIONS
@@ -30,9 +30,7 @@ import shutil
 import base64
 from flask_mail import Message
 import requests
-import torch
 import threading
-from transformers import TextIteratorStreamer
 from flask import Response
 import json
 
@@ -40,7 +38,12 @@ api_bp = Blueprint('api', __name__)
 CORS(api_bp, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True) # Enable CORS for all routes in this blueprint
 
 # AI Models are now handled by the standalone inference_server.py on port 5001
-INFERENCE_API_URL = os.getenv("INFERENCE_API_URL", "http://localhost:5001/generate")
+_inference_base = os.getenv("INFERENCE_API_URL", "http://localhost:5001")
+if _inference_base.endswith("/generate"):
+    INFERENCE_API_URL = _inference_base
+else:
+    # Append /generate if it's just the base URL
+    INFERENCE_API_URL = f"{_inference_base.rstrip('/')}/generate"
 
 def get_chatbot_models():
     """No longer loads models locally to save memory."""
@@ -164,19 +167,23 @@ def save_to_chat_history(user_id, conversation_id, user_msg, bot_msg, is_crisis=
         db.session.commit()
 
         if is_crisis:
+            # Resolve username for the real-time alert payload
+            try:
+                _alert_user = User.query.get(int(user_id))
+                _username = _alert_user.username if _alert_user else f"User #{user_id}"
+            except Exception:
+                _username = f"User #{user_id}"
             # Emit real-time alert to Admin and Counselor
-            socketio.emit('high-risk-alert', {
+            _alert_payload = {
                 "user_id": user_id,
+                "username": _username,
                 "message": user_msg,
-                "timestamp": dt.utcnow().isoformat(),
+                "emotion": emotion or "unknown",
+                "timestamp": dt.utcnow().isoformat() + "Z",
                 "type": "crisis"
-            }, room='admin')
-            socketio.emit('high-risk-alert', {
-                "user_id": user_id,
-                "message": user_msg,
-                "timestamp": dt.utcnow().isoformat(),
-                "type": "crisis"
-            }, room='counselor')
+            }
+            socketio.emit('high-risk-alert', _alert_payload, room='admin')
+            socketio.emit('high-risk-alert', _alert_payload, room='counselor')
     except Exception as e:
         db.session.rollback()
         print(f"Failed to save history: {e}")
@@ -188,8 +195,13 @@ def chatbot_endpoint():
     # 3. Identify user from JWT (if provided)
     user_id = None
     try:
-        if get_jwt_header():
-            user_id = get_jwt_identity()
+        from flask_jwt_extended import decode_token
+        auth_header = request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
+            if token and token != 'null':
+                decoded = decode_token(token)
+                user_id = decoded.get('sub')
     except Exception:
         pass
 
@@ -239,19 +251,22 @@ def chatbot_endpoint():
                 db.session.rollback()
                 print(f"Failed to save crisis history: {e}")
         
-        # Emit real-time alert even if history save fails or for anonymous users (if you want)
-        socketio.emit('high-risk-alert', {
+        # Emit real-time alert (include username for the admin modal)
+        try:
+            _alert_user = User.query.get(int(user_id)) if user_id else None
+            _username = _alert_user.username if _alert_user else f"User #{user_id or 'anonymous'}"
+        except Exception:
+            _username = f"User #{user_id}"
+        _crisis_payload = {
             "user_id": user_id,
+            "username": _username,
             "message": user_input,
-            "timestamp": dt.utcnow().isoformat(),
+            "emotion": emotion_label or "unknown",
+            "timestamp": dt.utcnow().isoformat() + "Z",
             "type": "crisis"
-        }, room='admin')
-        socketio.emit('high-risk-alert', {
-            "user_id": user_id,
-            "message": user_input,
-            "timestamp": dt.utcnow().isoformat(),
-            "type": "crisis"
-        }, room='counselor')
+        }
+        socketio.emit('high-risk-alert', _crisis_payload, room='admin')
+        socketio.emit('high-risk-alert', _crisis_payload, room='counselor')
         
         return jsonify(response=bot_response, followUps=[], conversation_id=conversation_id), 200
 
@@ -314,6 +329,7 @@ def chatbot_endpoint():
 
         def generate_proxy_stream():
             try:
+                print(f"Proxying to Inference Server: {INFERENCE_API_URL}", flush=True)
                 with requests.post(INFERENCE_API_URL, json=payload, stream=True, timeout=120) as r:
                     for line in r.iter_lines():
                         if line:
@@ -916,6 +932,27 @@ def complete_profile():
 
     return jsonify(msg="Your profile has been securely saved."), 201
 
+@api_bp.route('/admin/alerts/high-risk', methods=['GET'])
+@roles_required('admin')
+def get_high_risk_alerts():
+    """Returns all historical crisis chat messages for the admin dashboard."""
+    try:
+        alerts = ChatHistory.query.filter_by(
+            is_crisis=True, sender='user'
+        ).order_by(ChatHistory.timestamp.desc()).limit(50).all()
+        
+        return jsonify([{
+            "id": a.id,
+            "user_id": a.user_id,
+            "username": a.user.username,
+            "message": a.message,
+            "timestamp": a.timestamp.isoformat() + "Z",
+            "emotion": a.emotion or "unknown",
+            "type": "crisis"
+        } for a in alerts]), 200
+    except Exception as e:
+        return jsonify(msg=str(e)), 500
+
 @api_bp.route('/admin/analytics/assessments', methods=['GET'])
 @roles_required('admin')
 def get_assessment_analytics():
@@ -1192,22 +1229,43 @@ def get_analytics_overview():
     # 1. Total Users
     total_users = User.query.count()
     
-    # 2. Active Users (Users with activity in last 30 days)
+    # 2. Active Users — users with activity log in last 30 days, fallback to ChatHistory
     thirty_days_ago = dt.utcnow() - timedelta(days=30)
-    active_users = User.query.join(UserActivityLog).filter(UserActivityLog.timestamp >= thirty_days_ago).distinct().count()
+    active_users = User.query.join(UserActivityLog).filter(
+        UserActivityLog.timestamp >= thirty_days_ago
+    ).distinct().count()
     
-    # 3. Total Sessions (Appointments with status 'completed' - assuming logic, or just all booked)
-    total_sessions = Appointment.query.filter_by(status='completed').count()
+    # Fallback: if activity log is sparse, count users with any chat in last 30 days
+    if active_users == 0:
+        active_users = db.session.query(ChatHistory.user_id).filter(
+            ChatHistory.user_id.isnot(None),
+            ChatHistory.timestamp >= thirty_days_ago
+        ).distinct().count()
     
-    # 4. Total Sessions (Appointments with status 'completed')
-    total_sessions = Appointment.query.filter_by(status='completed').count()
+    # 3. Total Sessions — count of AI chatbot sessions (ChatSession)
+    total_sessions = ChatSession.query.count()
     
-    # Avg Session Duration (Placeholder)
-    avg_duration = "45 min" 
+    # 4. Avg Session Duration — compute from actual ChatSession start/end times
+    completed_sessions = ChatSession.query.filter(
+        ChatSession.end_time.isnot(None),
+        ChatSession.start_time.isnot(None)
+    ).all()
+    
+    if completed_sessions:
+        total_seconds = sum(
+            (s.end_time - s.start_time).total_seconds()
+            for s in completed_sessions
+            if s.end_time > s.start_time
+        )
+        avg_seconds = total_seconds / len(completed_sessions)
+        minutes = int(avg_seconds // 60)
+        seconds = int(avg_seconds % 60)
+        avg_duration = f"{minutes}m {seconds}s"
+    else:
+        avg_duration = "N/A"
     
     # 5. Urgent Action Required (Unacknowledged Crisis)
     unacknowledged_alerts = ChatHistory.query.filter_by(is_crisis=True).count()
-    # Let's count all `is_crisis=True` for now since we lack an acknowledgement flag.
     
     return jsonify({
         "totalUsers": total_users,
@@ -1697,26 +1755,7 @@ def get_holistic_analytics():
         "insights": insights
     })
 
-@api_bp.route('/admin/alerts/high-risk', methods=['GET'])
-@roles_required('admin')
-def get_high_risk_alerts():
-    """Fetches unacknowledged high-risk alerts."""
-    high_risk_chats = ChatHistory.query.filter_by(is_crisis=True).order_by(ChatHistory.timestamp.desc()).limit(20).all()
-    
-    # In a real app, we'd have an Alert table with acknowledgment status.
-    # For now, we'll return recent crisis messages and group them by user.
-    alerts = []
-    for chat in high_risk_chats:
-        alerts.append({
-            "id": chat.id,
-            "user_id": chat.user_id,
-            "username": chat.user.username,
-            "message": chat.message,
-            "timestamp": chat.timestamp.isoformat(),
-            "risk_score": 85, # Mock score
-            "risk_factors": [chat.emotion or "distressed", "crisis_keyword"]
-        })
-    return jsonify(alerts)
+
 
 @api_bp.route('/admin/student/<int:user_id>/confidential', methods=['GET'])
 @roles_required('admin')
@@ -1910,29 +1949,27 @@ def reply_to_post(post_id):
 @api_bp.route('/mood-checkin/today-status', methods=['GET'])
 @jwt_required()
 def get_today_mood_checkin():
-    """Returns all mood check-ins for today, using last_checkin_date for safety."""
+    """Returns all mood check-ins for today, using IST-aware date for safety."""
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
-    today = datetime.date.today()
+    # Use IST date to match the user's local "today" (UTC+5:30)
+    today_ist = (datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)).date()
     
     # Use the User's last_checkin_date to determine if they've already logged today
-    # This is more robust against timezone mismatches than querying timestamps directly
-    has_checked_in = (user.last_checkin_date == today)
+    has_checked_in = (user.last_checkin_date == today_ist)
     
-    # Fetch checkins within a wide window (last 24h) to catch timezone overlaps in history
-    # but filter for the ones users would consider "today"
+    # Fetch checkins within the last 24h window
     checkins = MoodCheckin.query.filter(
         MoodCheckin.user_id == user_id,
-        MoodCheckin.timestamp >= datetime.datetime.now() - datetime.timedelta(hours=24)
+        MoodCheckin.timestamp >= datetime.datetime.utcnow() - datetime.timedelta(hours=24)
     ).order_by(MoodCheckin.timestamp.asc()).all()
 
     if checkins:
-        # Latest mood entry
         latest = checkins[-1]
         history = [{
             "mood": c.mood,
             "intensity": c.intensity,
-            "timestamp": c.timestamp.isoformat()
+            "timestamp": c.timestamp.isoformat() + "Z"
         } for c in checkins]
         
         return jsonify({
@@ -1941,7 +1978,7 @@ def get_today_mood_checkin():
             "latest": {
                 "mood": latest.mood,
                 "intensity": latest.intensity,
-                "timestamp": latest.timestamp.isoformat()
+                "timestamp": latest.timestamp.isoformat() + "Z"
             },
             "allCheckins": history
         })
@@ -2005,13 +2042,14 @@ def add_mood_checkin():
 
     # Streak Logic
     user = User.query.get(user_id)
-    today = datetime.date.today()
+    # Use IST date so daily reset works correctly for IST users (UTC+5:30)
+    today = (datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)).date()
     
     # Initialize streak_count if it's None
     if user.streak_count is None:
         user.streak_count = 0
         
-    print(f"DEBUG: Streak logic for user {user_id}. last_checkin: {user.last_checkin_date}, today: {today}")
+    print(f"DEBUG: Streak logic for user {user_id}. last_checkin: {user.last_checkin_date}, today (IST): {today}")
     
     if user.last_checkin_date is None:
         user.streak_count = 1
@@ -2026,7 +2064,7 @@ def add_mood_checkin():
             print(f"DEBUG: Gap in checkin. Streak reset to 1")
         user.last_checkin_date = today
     else:
-        print(f"DEBUG: Already checked in today. Streak remains {user.streak_count}")
+        print(f"DEBUG: Already checked in today (IST). Streak remains {user.streak_count}")
     
     db.session.commit()
     
@@ -2043,8 +2081,9 @@ def get_user_streak():
     user = User.query.get(user_id)
     
     # Check if streak should be reset (if they missed yesterday)
-    today = datetime.date.today()
-    print(f"DEBUG: get_user_streak for {user_id}. last_checkin: {user.last_checkin_date}, today: {today}")
+    # Use IST date so streak resets correctly for users in UTC+5:30
+    today = (datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)).date()
+    print(f"DEBUG: get_user_streak for {user_id}. last_checkin: {user.last_checkin_date}, today (IST): {today}")
     if user.last_checkin_date and user.last_checkin_date < today - datetime.timedelta(days=1):
         print(f"DEBUG: Streak reset for {user_id}. last_checkin was {user.last_checkin_date}")
         user.streak_count = 0
