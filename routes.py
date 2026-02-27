@@ -143,37 +143,29 @@ def send_with_maileroo(to_email, subject, body_text):
         return False
 
 def save_to_chat_history(user_id, conversation_id, user_msg, bot_msg, is_crisis=False, intent="General", sentiment=0.5, emotion="neutral"):
-    """Helper to save chat interaction to persistent history."""
+    """Helper to save chat interaction as a single row per exchange."""
     if not user_id:
         return
     try:
-        user_entry = ChatHistory(
+        entry = ChatHistory(
             user_id=user_id,
             conversation_id=conversation_id,
-            sender='user',
-            message=user_msg,
+            user_message=user_msg,
+            bot_response=bot_msg,
             emotion=emotion,
             sentiment_score=sentiment,
             intent=intent,
             is_crisis=is_crisis
         )
-        bot_entry = ChatHistory(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            sender='bot',
-            message=bot_msg
-        )
-        db.session.add_all([user_entry, bot_entry])
+        db.session.add(entry)
         db.session.commit()
 
         if is_crisis:
-            # Resolve username for the real-time alert payload
             try:
                 _alert_user = User.query.get(int(user_id))
                 _username = _alert_user.username if _alert_user else f"User #{user_id}"
             except Exception:
                 _username = f"User #{user_id}"
-            # Emit real-time alert to Admin and Counselor
             _alert_payload = {
                 "user_id": user_id,
                 "username": _username,
@@ -187,6 +179,7 @@ def save_to_chat_history(user_id, conversation_id, user_msg, bot_msg, is_crisis=
     except Exception as e:
         db.session.rollback()
         print(f"Failed to save history: {e}")
+
 
 @api_bp.route('/chatbot', methods=['POST'])
 def chatbot_endpoint():
@@ -239,13 +232,13 @@ def chatbot_endpoint():
         bot_response = CRISIS_RESPONSE
         if user_id:
             try:
-                user_entry = ChatHistory(
-                    user_id=user_id, conversation_id=conversation_id, sender='user', 
-                    message=user_input, emotion=emotion_label, sentiment_score=sentiment_score,
-                    intent=predicted_label, is_crisis=is_crisis
+                crisis_entry = ChatHistory(
+                    user_id=user_id, conversation_id=conversation_id,
+                    user_message=user_input, bot_response=CRISIS_RESPONSE,
+                    emotion=emotion_label, sentiment_score=sentiment_score,
+                    intent=predicted_label, is_crisis=True
                 )
-                bot_entry = ChatHistory(user_id=user_id, conversation_id=conversation_id, sender='bot', message=bot_response)
-                db.session.add_all([user_entry, bot_entry])
+                db.session.add(crisis_entry)
                 db.session.commit()
             except Exception as e:
                 db.session.rollback()
@@ -267,8 +260,24 @@ def chatbot_endpoint():
         }
         socketio.emit('high-risk-alert', _crisis_payload, room='admin')
         socketio.emit('high-risk-alert', _crisis_payload, room='counselor')
-        
-        return jsonify(response=bot_response, followUps=[], conversation_id=conversation_id), 200
+
+        # Return as SSE stream so the frontend's stream reader can display it correctly
+        crisis_follow_ups = [
+            "Book a Counselor Session",
+            "Tell me more about what you're feeling",
+            "What kind of support would help right now?"
+        ]
+
+        def crisis_stream():
+            # Send the full message as a single chunk so it renders immediately
+            yield f"data: {json.dumps({'chunk': bot_response})}\n\n"
+            # Send the final signal with follow-ups so the frontend knows streaming is done
+            yield f"data: {json.dumps({'final': True, 'full_response': bot_response, 'followUps': crisis_follow_ups, 'conversation_id': conversation_id, 'is_crisis': True})}\n\n"
+
+        crisis_response = Response(crisis_stream(), mimetype='text/event-stream')
+        crisis_response.headers['Cache-Control'] = 'no-cache'
+        crisis_response.headers['X-Accel-Buffering'] = 'no'
+        return crisis_response
 
     # 9. Step 2: Generate Response with Responder Model (Llama-3.2)
     try:
@@ -311,11 +320,15 @@ def chatbot_endpoint():
                 user_id=user_id,
                 conversation_id=conversation_id
             ).order_by(ChatHistory.timestamp.asc()).all()
-            
-            lookback_window = 15  # Maintained as requested
+
+            lookback_window = 15
             for turn in conversation_history[-lookback_window:]:
-                role = "user" if turn.sender == 'user' else "assistant"
-                formatted_prompt += f"<|start_header_id|>{role}<|end_header_id|>\n\n{turn.message}<|eot_id|>"
+                # Each row has user_message + bot_response (single row per exchange)
+                if turn.user_message:
+                    formatted_prompt += f"<|start_header_id|>user<|end_header_id|>\n\n{turn.user_message}<|eot_id|>"
+                if turn.bot_response:
+                    formatted_prompt += f"<|start_header_id|>assistant<|end_header_id|>\n\n{turn.bot_response}<|eot_id|>"
+
         
         # Add current user input and assistant start
         formatted_prompt += f"<|start_header_id|>user<|end_header_id|>\n\n{user_input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
@@ -327,7 +340,14 @@ def chatbot_endpoint():
             "history_prompt": formatted_prompt.replace(f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{sys_prompt}<|eot_id|>", "")
         }
 
+        # Capture the real app object NOW (while request context is active).
+        # current_app is a proxy and cannot be used inside a streaming generator
+        # that runs outside the request context (eventlet async).
+        flask_app = current_app._get_current_object()
+
         def generate_proxy_stream():
+            full_text_accumulator = ""  # Accumulate all chunks as fallback
+            history_saved = False       # Flag to avoid double-saving
             try:
                 print(f"Proxying to Inference Server: {INFERENCE_API_URL}", flush=True)
                 with requests.post(INFERENCE_API_URL, json=payload, stream=True, timeout=120) as r:
@@ -335,25 +355,47 @@ def chatbot_endpoint():
                         if line:
                             decoded_line = line.decode('utf-8')
                             yield f"{decoded_line}\n\n"
-                            
-                            # Intercept final message to save metadata and history
+
                             if decoded_line.startswith("data: {"):
                                 try:
                                     json_data = json.loads(decoded_line[6:])
-                                    if json_data.get('final'):
-                                        # Save results to DB
-                                        f_response = json_data.get('full_response')
+
+                                    # Accumulate chunk text for fallback saving
+                                    if json_data.get('chunk'):
+                                        full_text_accumulator += json_data['chunk']
+
+                                    # Primary save path: when inference server sends final flag
+                                    if json_data.get('final') and not history_saved:
+                                        f_response = json_data.get('full_response') or full_text_accumulator
                                         p_label = json_data.get('predicted_label', 'General')
                                         s_score = json_data.get('sentiment_score', 0.5)
                                         e_label = json_data.get('emotion_label', 'neutral')
-                                        i_crisis = check_crisis(user_input, p_label, 1.0) # Check crisis with returned label
-                                        
-                                        save_to_chat_history(user_id, conversation_id, user_input, f_response, i_crisis, p_label, s_score, e_label)
+                                        # Use actual confidence score — NOT hardcoded 1.0
+                                        # so borderline model classifications don't trigger crisis
+                                        p_confidence = json_data.get('confidence_score', 0.5)
+                                        i_crisis = check_crisis(user_input, p_label, p_confidence)
+
+                                        # Use the captured real app object (not the proxy)
+                                        with flask_app.app_context():
+                                            save_to_chat_history(user_id, conversation_id, user_input, f_response, i_crisis, p_label, s_score, e_label)
+                                        history_saved = True
+                                        print(f"[Chat History] Saved for user_id={user_id}, conv={conversation_id}", flush=True)
                                 except Exception as e:
-                                    print(f"Error parsing final chunk in proxy: {e}")
+                                    print(f"Error parsing final chunk in proxy: {e}", flush=True)
+
             except Exception as e:
-                print(f"Inference server connection error: {e}")
+                print(f"Inference server connection error: {e}", flush=True)
                 yield f"data: {json.dumps({'chunk': 'I am having trouble connecting to my brain service. Please ensure the inference server is running.'})}\n\n"
+
+            # Fallback save: if generation ended but 'final' flag was never received
+            if not history_saved and full_text_accumulator and user_id:
+                try:
+                    print(f"[Chat History] Fallback save for user_id={user_id}", flush=True)
+                    with flask_app.app_context():
+                        save_to_chat_history(user_id, conversation_id, user_input, full_text_accumulator)
+                except Exception as e:
+                    print(f"[Chat History] Fallback save failed: {e}", flush=True)
+
 
         response = Response(generate_proxy_stream(), mimetype='text/event-stream')
         response.headers['Cache-Control'] = 'no-cache'
@@ -935,23 +977,59 @@ def complete_profile():
 @api_bp.route('/admin/alerts/high-risk', methods=['GET'])
 @roles_required('admin')
 def get_high_risk_alerts():
-    """Returns all historical crisis chat messages for the admin dashboard."""
+    """Returns crisis chat history entries for the admin review dashboard."""
     try:
-        alerts = ChatHistory.query.filter_by(
-            is_crisis=True, sender='user'
-        ).order_by(ChatHistory.timestamp.desc()).limit(50).all()
-        
-        return jsonify([{
-            "id": a.id,
-            "user_id": a.user_id,
-            "username": a.user.username,
-            "message": a.message,
-            "timestamp": a.timestamp.isoformat() + "Z",
-            "emotion": a.emotion or "unknown",
-            "type": "crisis"
-        } for a in alerts]), 200
+        crisis_entries = (
+            ChatHistory.query
+            .filter_by(is_crisis=True)
+            .order_by(ChatHistory.timestamp.desc())
+            .limit(50)
+            .all()
+        )
+
+        result = []
+        for entry in crisis_entries:
+            user = User.query.get(entry.user_id)
+            result.append({
+                "id": entry.id,
+                "user_id": entry.user_id,
+                "username": user.username if user else f"User #{entry.user_id}",
+                "message": entry.user_message or "",
+                "bot_response": entry.bot_response or "",
+                "emotion": entry.emotion or "unknown",
+                "intent": entry.intent or "unknown",
+                "timestamp": entry.timestamp.isoformat() + "Z" if entry.timestamp else None,
+                "conversation_id": entry.conversation_id,
+                "is_resolved": entry.is_resolved or False,
+                "type": "crisis"
+            })
+
+        return jsonify(result), 200
     except Exception as e:
         return jsonify(msg=str(e)), 500
+
+
+@api_bp.route('/admin/alerts/high-risk/<int:alert_id>/resolve', methods=['PUT'])
+@roles_required('admin')
+def resolve_high_risk_alert_admin(alert_id):
+    """Admin marks a crisis alert as resolved."""
+    entry = ChatHistory.query.get_or_404(alert_id)
+    entry.is_resolved = True
+    db.session.commit()
+    return jsonify({"msg": "Marked as resolved"}), 200
+
+
+@api_bp.route('/counselor/alerts/high-risk/<int:alert_id>/resolve', methods=['PUT'])
+@roles_required('counselor')
+def resolve_high_risk_alert_counselor(alert_id):
+    """Counselor marks a crisis alert as resolved after outreach."""
+    entry = ChatHistory.query.get_or_404(alert_id)
+    entry.is_resolved = True
+    db.session.commit()
+    return jsonify({"msg": "Marked as resolved"}), 200
+
+
+
 
 @api_bp.route('/admin/analytics/assessments', methods=['GET'])
 @roles_required('admin')
@@ -1275,6 +1353,9 @@ def get_analytics_overview():
         "unacknowledgedAlerts": unacknowledged_alerts
     })
 
+
+
+
 @api_bp.route('/admin/analytics/counselors-status', methods=['GET'])
 @roles_required('admin')
 def get_counselors_status():
@@ -1593,15 +1674,44 @@ def get_mood_analytics():
 @api_bp.route('/admin/analytics/resources', methods=['GET'])
 @roles_required('admin')
 def get_resource_analytics():
-    # Top 5 most active resources
-    top_resources = db.session.query(
-        Resource.title, Resource.type, func.count(UserActivityLog.id)
-    ).join(UserActivityLog).group_by(Resource.id).order_by(func.count(UserActivityLog.id).desc()).limit(5).all()
-    
-    return jsonify([
-        {"title": r[0], "type": r[1], "views": r[2]}
-        for r in top_resources
-    ])
+    try:
+        # LEFT JOIN so resources with 0 activity log entries still appear
+        top_resources = db.session.query(
+            Resource.title,
+            Resource.type,
+            func.count(UserActivityLog.id).label('views')
+        ).outerjoin(
+            UserActivityLog, UserActivityLog.resource_id == Resource.id
+        ).filter(
+            Resource.status == 'licensed'  # only show approved resources
+        ).group_by(
+            Resource.id, Resource.title, Resource.type
+        ).order_by(
+            func.count(UserActivityLog.id).desc()
+        ).limit(5).all()
+
+        # If no licensed resources, return all resources regardless of status
+        if not top_resources:
+            top_resources = db.session.query(
+                Resource.title,
+                Resource.type,
+                func.count(UserActivityLog.id).label('views')
+            ).outerjoin(
+                UserActivityLog, UserActivityLog.resource_id == Resource.id
+            ).group_by(
+                Resource.id, Resource.title, Resource.type
+            ).order_by(
+                func.count(UserActivityLog.id).desc()
+            ).limit(5).all()
+
+        return jsonify([
+            {"title": r[0], "type": r[1], "views": r[2]}
+            for r in top_resources
+        ])
+    except Exception as e:
+        print(f"Resource analytics error: {e}")
+        return jsonify([]), 200
+
 
 @api_bp.route('/admin/analytics/chat', methods=['GET'])
 @roles_required('admin')
@@ -1771,8 +1881,7 @@ def get_student_confidential_admin(user_id):
         "name": conf.name,
         "phone": conf.phone_number,
         "parent_name": conf.parent_name,
-        "parent_phone": conf.parent_phone_number,
-        "email": user.email_hash # simplified
+        "parent_phone": conf.parent_phone_number
     })
 
 @api_bp.route('/counselor/student/<int:user_id>/confidential', methods=['GET'])
@@ -1788,8 +1897,7 @@ def get_student_confidential_counselor(user_id):
     return jsonify({
         "username": user.username,
         "name": conf.name,
-        "phone": conf.phone_number,
-        "email": user.email_hash
+        "phone": conf.phone_number
     })
 
 @api_bp.route('/admin/assign-counselor', methods=['POST'])
@@ -1949,19 +2057,25 @@ def reply_to_post(post_id):
 @api_bp.route('/mood-checkin/today-status', methods=['GET'])
 @jwt_required()
 def get_today_mood_checkin():
-    """Returns all mood check-ins for today, using IST-aware date for safety."""
+    """Returns all mood check-ins for today, using IST-aware date."""
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
     # Use IST date to match the user's local "today" (UTC+5:30)
-    today_ist = (datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)).date()
-    
-    # Use the User's last_checkin_date to determine if they've already logged today
+    now_ist = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
+    today_ist = now_ist.date()
+
+    # IST midnight boundaries for today
+    today_ist_start = datetime.datetime(today_ist.year, today_ist.month, today_ist.day) - datetime.timedelta(hours=5, minutes=30)
+    today_ist_end = today_ist_start + datetime.timedelta(days=1)
+
+    # Use the User's last_checkin_date: true ONLY if they checked in today (IST)
     has_checked_in = (user.last_checkin_date == today_ist)
-    
-    # Fetch checkins within the last 24h window
+
+    # Fetch checkins within today's IST window only
     checkins = MoodCheckin.query.filter(
         MoodCheckin.user_id == user_id,
-        MoodCheckin.timestamp >= datetime.datetime.utcnow() - datetime.timedelta(hours=24)
+        MoodCheckin.timestamp >= today_ist_start,
+        MoodCheckin.timestamp < today_ist_end
     ).order_by(MoodCheckin.timestamp.asc()).all()
 
     if checkins:
@@ -1971,9 +2085,9 @@ def get_today_mood_checkin():
             "intensity": c.intensity,
             "timestamp": c.timestamp.isoformat() + "Z"
         } for c in checkins]
-        
+
         return jsonify({
-            "hasCheckedIn": has_checked_in or len(checkins) > 0, 
+            "hasCheckedIn": has_checked_in,
             "count": len(checkins),
             "latest": {
                 "mood": latest.mood,
@@ -1984,10 +2098,11 @@ def get_today_mood_checkin():
         })
     else:
         return jsonify({
-            "hasCheckedIn": has_checked_in, 
-            "count": 0, 
+            "hasCheckedIn": has_checked_in,
+            "count": 0,
             "allCheckins": []
         })
+
 
 @api_bp.route('/mood-checkin', methods=['POST'])
 @jwt_required()

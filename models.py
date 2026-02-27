@@ -71,17 +71,22 @@ class ChatHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     conversation_id = db.Column(db.String(36), nullable=False, index=True)
-    sender = db.Column(db.String(10), nullable=False) # 'user' or 'bot'
-    message = db.Column(db.Text, nullable=False)
+    # Primary columns: one row per exchange
+    user_message = db.Column(db.Text, nullable=True)
+    bot_response = db.Column(db.Text, nullable=True)
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-    
+    # Legacy columns (kept nullable for backward compatibility)
+    sender = db.Column(db.String(10), nullable=True)   # kept but unused
+    message = db.Column(db.Text, nullable=True)        # kept but unused
     # Analytics Fields
     intent = db.Column(db.String(100), nullable=True)
     emotion = db.Column(db.String(50), nullable=True)
     sentiment_score = db.Column(db.Float, nullable=True)
     is_crisis = db.Column(db.Boolean, default=False)
+    is_resolved = db.Column(db.Boolean, default=False)  # Counsellor marks as resolved
 
     user = db.relationship('User', backref=db.backref('chat_history', lazy=True))
+
 
 class ChatSession(db.Model):
     __tablename__ = 'chat_session'
@@ -105,6 +110,7 @@ class ConfidentialData(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, unique=True)
     user = db.relationship('User', backref=db.backref('confidential_data', uselist=False))
     name = db.Column(db.String(150), nullable=False)
+    email_plain = db.Column(db.String(120), nullable=True)  # Plain email for outreach
     phone_number = db.Column(db.String(20), nullable=False)
     parent_name = db.Column(db.String(150), nullable=False)
     parent_phone_number = db.Column(db.String(20), nullable=False)

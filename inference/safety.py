@@ -9,22 +9,32 @@ CRISIS_RESPONSE = (
 )
 
 CRISIS_KEYWORDS = [
-    "kill myself", "end my life", "suicide", "die", "hurt myself", "self-harm", 
-    "cut myself", "take my life", "don't want to live", "ending it all", "better off dead"
+    "kill myself", "end my life", "suicide", "suicidal", "die", "hurt myself", "self-harm",
+    "cut myself", "take my life", "don't want to live", "ending it all", "better off dead",
+    "want to die", "no reason to live"
 ]
-CRISIS_LABELS = ["suicidal", "self-harm", "depressed"]
+CRISIS_LABELS = ["suicidal", "self-harm"]
+
+# If a message contains these academic/everyday words, do NOT flag via label alone
+# (keyword check above still catches true crisis phrases)
+ACADEMIC_CONTEXT_WORDS = [
+    "study", "studies", "exam", "exams", "test", "college", "university", "homework",
+    "assignment", "marks", "grade", "school", "project", "syllabus", "lecture"
+]
 
 def is_crisis(message, label, score):
     """
     Checks if a message indicates a crisis using both detected label and keywords.
     """
-    # Keyword check (High priority override)
     message_lower = message.lower()
+
+    # 1. Keyword check — always takes priority regardless of label
     if any(word in message_lower for word in CRISIS_KEYWORDS):
         return True
-    
-    # Label check with tuned threshold (increased to 0.7 for label-based detection)
-    if label.lower() in CRISIS_LABELS and score > 0.7:
+
+    # 2. Label check — only when confidence is very high AND no academic context
+    has_academic_context = any(w in message_lower for w in ACADEMIC_CONTEXT_WORDS)
+    if not has_academic_context and label.lower() in CRISIS_LABELS and score >= 0.88:
         return True
-        
+
     return False
