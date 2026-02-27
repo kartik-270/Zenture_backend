@@ -268,6 +268,7 @@ def chatbot_endpoint():
             "What kind of support would help right now?"
         ]
 
+
         def crisis_stream():
             # Send the full message as a single chunk so it renders immediately
             yield f"data: {json.dumps({'chunk': bot_response})}\n\n"
@@ -2362,7 +2363,7 @@ def get_counselor_profile(profile_id):
                 "time": time_str,
                 "available": time_str not in booked_times
             })
-            current_time += timedelta(minutes=30)
+            current_time += timedelta(minutes=15)
 
     return jsonify({
         "counselor_id": counselor_profile.user_id,
@@ -2917,3 +2918,36 @@ def get_client_details(student_id):
     }), 200
 
 
+# --- Video & Network Traversal ---
+import os
+import requests
+
+@api_bp.route('/session/turn-credentials', methods=['GET'])
+@jwt_required()
+def get_turn_credentials():
+    """Generates short-lived TURN credentials using Metered API."""
+    metered_domain = os.environ.get('METERED_DOMAIN')
+    metered_secret = os.environ.get('METERED_SECRET_KEY')
+    
+    if not metered_domain or not metered_secret:
+        return jsonify({
+            "iceServers": [
+                { "urls": "stun:stun.l.google.com:19302" },
+                { "urls": "stun:global.stun.twilio.com:3478" }
+            ]
+        })
+
+    try:
+        response = requests.get(f"https://{metered_domain}/api/v1/turn/credentials?apiKey={metered_secret}")
+        data = response.json()
+        
+        # Metered returns an array directly, or sometimes an object
+        if isinstance(data, list):
+            return jsonify({ "iceServers": data })
+        elif "iceServers" in data:
+            return jsonify({ "iceServers": data["iceServers"] })
+        else:
+            return jsonify({ "error": "Unknown format" }), 500
+    except Exception as e:
+        print(f"Metered TURN Error: {e}", flush=True)
+        return jsonify({"error": str(e)}), 500
