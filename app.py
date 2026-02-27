@@ -49,14 +49,34 @@ except Exception as e:
 
 # --- WebRTC Signaling Events ---
 
+# Map socket IDs to their respective room and user to handle unexpected disconnects cleanly
+active_sockets = {}
+
 @socketio.on('join-room')
 def handle_join_room(data):
+    from flask import request
     room = data.get('roomId')
     user_id = data.get('userId')
+    
+    # Store socket metadata to broadcast disconnect when the tab is closed
+    active_sockets[request.sid] = {"room": room, "userId": user_id}
+    
     join_room(room)
     print(f"User {user_id} joined room {room}")
     # Notify others in the room
     emit('user-connected', user_id, room=room, include_self=False)
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    from flask import request
+    # Detect if a user dropped their socket (closed tab / lost network)
+    socket_data = active_sockets.pop(request.sid, None)
+    if socket_data:
+        room = socket_data["room"]
+        user_id = socket_data["userId"]
+        print(f"User {user_id} disconnected from room {room}")
+        # Tell the peer to completely tear down their RTCPeerConnection to avoid SDP race conditions
+        emit('user-disconnected', user_id, room=room, include_self=False)
 
 @socketio.on('offer')
 def handle_offer(data):
