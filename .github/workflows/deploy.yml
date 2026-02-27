@@ -22,4 +22,7 @@ jobs:
             git reset --hard origin/main
             source venv/bin/activate
             pip install -r requirements.txt
+            pip install eventlet
+            sudo sed -i 's/^ExecStart=.*/ExecStart=\/home\/ubuntu\/Zenture_backend\/venv\/bin\/gunicorn --worker-class eventlet -w 1 -b 127.0.0.1:8000 app:app/' /etc/systemd/system/zenture.service
+            sudo systemctl daemon-reload
             sudo systemctl restart zenture
