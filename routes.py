@@ -2922,7 +2922,10 @@ def get_client_details(student_id):
 import os
 import requests
 
+from flask_cors import cross_origin
+
 @api_bp.route('/session/turn-credentials', methods=['GET'])
+@cross_origin()
 @jwt_required()
 def get_turn_credentials():
     """Generates short-lived TURN credentials using Metered API."""
