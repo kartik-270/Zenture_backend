@@ -41,6 +41,7 @@ class MoodCheckin(db.Model):
     social_interaction = db.Column(db.Boolean, default=False)
     energy_level = db.Column(db.String(50), nullable=True) # Low, Medium, High
     analysis_report = db.Column(db.Text, nullable=True)
+    facial_stress_score = db.Column(db.Float, nullable=True)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.datetime.now)
     
     user = db.relationship('User', backref=db.backref('mood_checkins', lazy=True))
@@ -145,6 +146,13 @@ class Appointment(db.Model):
     session_started_at = db.Column(db.DateTime, nullable=True)
     session_ended_at = db.Column(db.DateTime, nullable=True)
     allow_messaging = db.Column(db.Boolean, default=False)
+    
+    # Feedback Columns
+    counselor_feedback = db.Column(db.Text, nullable=True) # Counselor's notes on student
+    student_emotional_state = db.Column(db.String(100), nullable=True) # How the student feels post-session
+    session_helpfulness = db.Column(db.Integer, nullable=True) # 1-5 scale
+    student_feedback = db.Column(db.Text, nullable=True) # Qualitative feedback on counselor/session
+    counselor_rating = db.Column(db.Integer, nullable=True) # 1-5 scale for counselor
 
 class Resource(db.Model):
     id = db.Column(db.Integer, primary_key=True)

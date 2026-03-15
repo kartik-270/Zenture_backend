@@ -502,6 +502,61 @@ def end_chatbot_session():
             
     db.session.commit()
     return jsonify(msg="Session ended successfully"), 200
+
+@api_bp.route('/chatbot/facial-analysis', methods=['POST'])
+@jwt_required()
+def chatbot_facial_analysis():
+    """
+    Proxy route: Accepts a base64 image from the frontend, forwards it to the
+    inference server for emotion detection, logs the result to the DB, and
+    returns the emotion/stress data back to the frontend.
+    This keeps the inference server hidden from direct frontend access.
+    """
+    import requests as http_requests
+    import os
+
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    image_b64 = data.get('image')
+
+    if not image_b64:
+        return jsonify({'error': 'No image provided'}), 400
+
+    inference_url = os.environ.get('INFERENCE_SERVER_URL', 'http://localhost:5001')
+
+    try:
+        # Forward the image to the inference server
+        inference_res = http_requests.post(
+            f"{inference_url}/facial-stress",
+            json={'image': image_b64},
+            timeout=15
+        )
+        inference_res.raise_for_status()
+        result = inference_res.json()
+
+        stress_level = result.get('stress_level')
+        emotion = result.get('emotion')
+
+        # Log to MoodCheckin table
+        if stress_level is not None:
+            new_checkin = MoodCheckin(
+                user_id=user_id,
+                mood=f"Facial: {emotion.capitalize()}" if emotion else "Facial Analysis",
+                intensity=max(1, min(10, int(round(stress_level)))),
+                facial_stress_score=float(stress_level),
+                analysis_report=f"Chatbot facial scan — emotion: {emotion}, stress: {stress_level}/10"
+            )
+            db.session.add(new_checkin)
+            db.session.commit()
+
+        return jsonify(result), 200
+
+    except http_requests.exceptions.Timeout:
+        return jsonify({'error': 'Inference server timed out'}), 504
+    except Exception as e:
+        print(f"Facial analysis proxy error: {e}")
+        return jsonify({'error': 'Facial analysis failed'}), 500
+
 def send_username_email(email, username):
     """Sends username via Maileroo API (production) or SMTP (local fallback)."""
     subject = "Your Username for Mental Health Platform"
@@ -1618,6 +1673,62 @@ def book_appointment():
             "meeting_link": new_appointment.meeting_link
         }
     }), 201
+
+# --- MUTUAL FEEDBACK ENDPOINTS ---
+
+@api_bp.route('/appointments/<int:appointment_id>/feedback', methods=['POST'])
+@jwt_required()
+def submit_appointment_feedback(appointment_id):
+    """Allows both counselors and students to submit feedback for an appointment."""
+    user_id = get_jwt_identity()
+    claims = get_jwt()
+    role = claims.get('role')
+    data = request.json
+    
+    appointment = Appointment.query.get_or_404(appointment_id)
+    
+    if role == 'counselor':
+        if appointment.counselor_id != user_id:
+            return jsonify({"error": "Unauthorized"}), 403
+        appointment.counselor_feedback = data.get('feedback')
+    elif role == 'student':
+        if appointment.student_id != user_id:
+            return jsonify({"error": "Unauthorized"}), 403
+        appointment.student_emotional_state = data.get('emotional_state')
+        appointment.session_helpfulness = data.get('helpfulness')
+        appointment.student_feedback = data.get('feedback')
+        appointment.counselor_rating = data.get('rating')
+    else:
+        return jsonify({"error": "Invalid role"}), 403
+        
+    db.session.commit()
+    return jsonify({"message": "Feedback submitted successfully"}), 200
+
+# --- FACIAL STRESS LOGGING ---
+
+@api_bp.route('/mood-checkin/facial-analysis', methods=['POST'])
+@jwt_required()
+def log_facial_analysis():
+    """Logs facial stress analysis results into a mood check-in or specific log."""
+    user_id = get_jwt_identity()
+    data = request.json
+    stress_score = data.get('stress_level')
+    
+    if stress_score is None:
+        return jsonify({"error": "Stress level is required"}), 400
+        
+    # Create a new mood check-in with 'facial_analysis' type
+    new_checkin = MoodCheckin(
+        user_id=user_id,
+        mood="Facial Analysis",
+        intensity=int(float(stress_score)), # Mapping 1-10 to intensity
+        facial_stress_score=float(stress_score),
+        analysis_report=f"Stress detected via facial analysis: {stress_score}/10"
+    )
+    db.session.add(new_checkin)
+    db.session.commit()
+    
+    return jsonify({"message": "Facial analysis logged", "checkin_id": new_checkin.id}), 201
 
 # --- ANALYTICS ENDPOINTS ---
 @api_bp.route('/admin/analytics/engagement', methods=['GET'])
