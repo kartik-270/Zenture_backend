@@ -41,3 +41,4 @@ logs_responder/
 *.pt
 *.safetensors
 *.onnx
+".env" 
