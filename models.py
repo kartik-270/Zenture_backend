@@ -41,6 +41,7 @@ class MoodCheckin(db.Model):
     social_interaction = db.Column(db.Boolean, default=False)
     energy_level = db.Column(db.String(50), nullable=True) # Low, Medium, High
     analysis_report = db.Column(db.Text, nullable=True)
+    wellness_score = db.Column(db.Float, nullable=True)
     facial_stress_score = db.Column(db.Float, nullable=True)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.datetime.now)
     
@@ -165,6 +166,7 @@ class Resource(db.Model):
     status = db.Column(db.String(20), default='pending') # pending, licensed, rejected
     author_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True) # Counselor who created it
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    views = db.Column(db.Integer, default=0)
     
     author = db.relationship('User', backref=db.backref('resources', lazy=True))
 

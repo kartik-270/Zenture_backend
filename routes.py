@@ -568,8 +568,8 @@ You requested your username. Your username is: {username}
 If you did not request this, please ignore this email.
 """
     # 1. Try Maileroo First (Production)
-    if send_with_maileroo(email, subject, body):
-        return True
+    # if send_with_maileroo(email, subject, body):
+    #     return True
         
     # 2. Fallback to SMTP (Local)
     try:
@@ -783,8 +783,52 @@ def get_public_resources():
         "url": r.url,
         "content": r.content,
         "author": r.author.username if r.author else "Zenture Team",
-        "date": r.created_at.strftime("%b %d, %Y")
+        "date": r.created_at.strftime("%b %d, %Y"),
+        "views": r.views
     } for r in resources]), 200
+
+@api_bp.route('/resources/<int:resource_id>', methods=['GET'])
+def get_single_resource(resource_id):
+    resource = Resource.query.get_or_404(resource_id)
+    
+    # Track view if user is logged in
+    try:
+        from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
+        verify_jwt_in_request(optional=True)
+        user_id = get_jwt_identity()
+        if user_id:
+            # Only record unique log for this user/resource
+            existing_log = UserActivityLog.query.filter_by(user_id=user_id, resource_id=resource_id).first()
+            if not existing_log:
+                new_log = UserActivityLog(user_id=user_id, resource_id=resource_id)
+                db.session.add(new_log)
+                resource.views += 1
+                db.session.commit()
+    except Exception as e:
+        print(f"Error logging resource view: {e}")
+
+    return jsonify({
+        "id": resource.id,
+        "title": resource.title,
+        "description": resource.description,
+        "type": resource.type,
+        "url": resource.url,
+        "content": resource.content,
+        "views": resource.views,
+        "author": resource.author.username if resource.author else "Zenture Team",
+        "date": resource.created_at.strftime("%b %d, %Y")
+    }), 200
+    resource = Resource.query.get_or_404(resource_id)
+    return jsonify({
+        "id": resource.id,
+        "title": resource.title,
+        "description": resource.description,
+        "type": resource.type,
+        "url": resource.url,
+        "content": resource.content,
+        "author": resource.author.username if resource.author else "Zenture Team",
+        "date": resource.created_at.strftime("%b %d, %Y")
+    }), 200
 
 # --- ADMIN RESOURCE MANAGEMENT ---
 
@@ -847,8 +891,8 @@ If you did not request this, please ignore this email.
 """
     
     # 1. Try Maileroo First
-    if send_with_maileroo(email, subject, body):
-        return True
+    # if send_with_maileroo(email, subject, body):
+    #     return True
         
     # 2. Fallback to SMTP
     try:
@@ -1183,11 +1227,23 @@ def admin_dashboard_data():
     user_count = User.query.count()
     appointment_count = Appointment.query.count()
     
+    # Get resource statistics (unique views and total views)
+    resources = Resource.query.filter_by(status='approved').order_by(Resource.views.desc()).all()
+    resource_stats = [
+        {
+            "id": r.id,
+            "title": r.title,
+            "type": r.type,
+            "views": r.views
+        } for r in resources
+    ]
+    
     return jsonify({
         "message": "Welcome, Admin!",
         "stats": {
             "totalUsers": user_count,
-            "totalAppointments": appointment_count
+            "totalAppointments": appointment_count,
+            "resources": resource_stats
         }
     }), 200
 
@@ -2225,36 +2281,35 @@ def add_mood_checkin():
     
     mood = data.get('mood')
     intensity = data.get('intensity', 5)
-    sleep = data.get('sleep_quality')
-    social = data.get('social_interaction', False)
-    energy = data.get('energy_level')
+    sleep = data.get('sleep', 'Good')
+    social = data.get('social', False)
+    energy = data.get('energy', 'Medium')
     
     if not mood:
         return jsonify(msg="Mood is required"), 400
 
-    # Simple Analysis Logic
-    summary_parts = []
-    if mood.lower() in ['sad', 'stressed', 'anxious']:
-        if intensity > 7:
-            summary_parts.append("You seem to be carrying a heavy load right now. Please be gentle with yourself.")
-        else:
-            summary_parts.append("It's okay to not be okay. Acknowledging your feelings is the first step.")
-    elif mood.lower() in ['excellent', 'happy', 'calm']:
-        summary_parts.append("It's wonderful that you're feeling good! Try to soak in this positive moment.")
-    
-    if sleep == 'Poor':
-        summary_parts.append("Rest is so important for mental clarity. Try to prioritize some quiet time today.")
-    
-    if not social:
-        summary_parts.append("Even a small interaction can boost your mood—consider reaching out to someone later.")
-    
-    if energy == 'Low' and mood.lower() == 'stressed':
-        summary_parts.append("Your energy is low while stress is high. A short break or some deep breathing might help.")
+    # 1. Wellness Index (0-10)
+    mood_w = {'Happy': 10, 'Calm': 10, 'Stressed': 4, 'Sad': 3, 'Anxious': 3, 'Angry': 2}
+    mood_b = mood_w.get(mood, 5)
+    int_f = (intensity/10.0) if mood in ['Happy', 'Calm'] else ((11-intensity)/10.0)
+    s_l = {'Excellent': 10, 'Good': 8, 'Fair': 5, 'Poor': 2}.get(sleep, 8)
+    e_l = {'High': 10, 'Medium': 7, 'Low': 3}.get(energy, 7)
+    wellness_score = round(((mood_b*0.4)+(int_f*10*0.2)+(s_l*0.15)+(e_l*0.15)+(10 if social else 0)*0.1), 1)
 
-    if not summary_parts:
-        summary_parts.append("Thanks for checking in! Monitoring your journey helps in building long-term wellness.")
+    # 2. Insights Generator
+    insights = []
+    if mood in ['Sad', 'Angry', 'Stressed', 'Anxious']:
+        if intensity > 7: insights.append("Intensity is high right now; remember deep breathing.")
+        if e_l < 5 and s_l < 5: insights.append("Fatigue is often linked to heighten stress or low mood; prioritize rest tonight.")
+        if not social: insights.append("When we struggle, we often withdraw. Try to reach out to one person today.")
+    elif mood in ['Happy', 'Calm']:
+        if e_l > 7: insights.append("You have strong momentum today—consider working on a creative project.")
+        if social: insights.append("Social connection is clearly boosting your wellbeing!")
 
-    analysis_report = " ".join(summary_parts)
+    if wellness_score < 4.5: insights.append("Your wellness index is a bit low today. Consider a counselor chat.")
+    if not insights: insights.append("Consistency helps you understand your wellness patterns.")
+
+    analysis_report = " ".join(insights[:3])
 
     new_checkin = MoodCheckin(
         user_id=user_id, 
@@ -2263,6 +2318,7 @@ def add_mood_checkin():
         sleep_quality=sleep,
         social_interaction=social,
         energy_level=energy,
+        wellness_score=wellness_score,
         analysis_report=analysis_report
     )
     db.session.add(new_checkin)
@@ -2345,6 +2401,7 @@ def get_mood_history():
         "sleep": c.sleep_quality,
         "social": c.social_interaction,
         "energy": c.energy_level,
+        "wellness_score": c.wellness_score, # Include the new score
         "analysis": c.analysis_report,
         "date": c.timestamp.isoformat()
     } for c in checkins]
@@ -2579,17 +2636,44 @@ def get_counsellor_dashboard_data():
         if appointments_query:
             db.session.commit()
 
-        distinct_student_ids = db.session.query(Appointment.student_id)\
-            .filter_by(counselor_id=counsellor_id).distinct()
+        # Filter clients to only those who have approved/booked appointments or specific messaging permission
+        permitted_student_ids = db.session.query(Appointment.student_id)\
+            .filter(
+                Appointment.counselor_id == counsellor_id,
+                (Appointment.status == 'booked') | (Appointment.allow_messaging == True)
+            ).distinct().all()
         
-        client_users = User.query.filter(User.id.in_(distinct_student_ids)).all()
+        permitted_student_ids = [s[0] for s in permitted_student_ids]
+        client_users = User.query.filter(User.id.in_(permitted_student_ids)).all()
 
-        clients_data = [{'name': user.username, 'status': 'Active', 'rating': 4.5} for user in client_users]
+        clients_data = [{'name': user.username, 'status': 'Active', 'id': user.id} for user in client_users]
+
+        # Calculate Average Session Duration
+        completed_sessions = Appointment.query.filter(
+            Appointment.counselor_id == counsellor_id,
+            Appointment.status == 'completed',
+            Appointment.session_started_at.isnot(None),
+            Appointment.session_ended_at.isnot(None)
+        ).all()
+
+        total_duration = 0
+        count = 0
+        for s in completed_sessions:
+            duration = (s.session_ended_at - s.session_started_at).total_seconds() / 60.0
+            if duration > 0:
+                total_duration += duration
+                count += 1
+        
+        avg_duration = round(total_duration / count, 1) if count > 0 else "N/A"
 
         dashboard_data = {
             'counsellorName': counsellor.username,
             'appointments': appointments_data,
-            'clients': clients_data
+            'clients': clients_data,
+            'stats': {
+                'totalSessions': len(completed_sessions),
+                'averageSessionDuration': avg_duration
+            }
         }
         
         return jsonify(dashboard_data), 200
@@ -2597,6 +2681,62 @@ def get_counsellor_dashboard_data():
     except Exception as e:
         print(f"Error fetching counsellor dashboard data: {e}")
         return jsonify({"msg": "An error occurred while fetching dashboard data"}), 500
+
+@api_bp.route('/pending-feedbacks', methods=['GET'])
+@jwt_required()
+def get_pending_feedbacks():
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    
+    if not user:
+        return jsonify(msg="User not found"), 404
+    
+    pending = []
+    if user.role == UserRole.STUDENT:
+        # Sessions completed > 15 mins ago (approx) where student feedback is empty
+        appointments = Appointment.query.filter(
+            Appointment.student_id == user_id,
+            Appointment.status == 'completed',
+            Appointment.student_feedback.is_(None)
+        ).all()
+        for a in appointments:
+            pending.append({
+                "id": a.id,
+                "role": "student",
+                "counselor_name": a.counselor.username,
+                "time": a.appointment_time.isoformat()
+            })
+    elif user.role == UserRole.COUNSELOR:
+        appointments = Appointment.query.filter(
+            Appointment.counselor_id == user_id,
+            Appointment.status == 'completed',
+            Appointment.counselor_feedback.is_(None)
+        ).all()
+        for a in appointments:
+            pending.append({
+                "id": a.id,
+                "role": "counselor",
+                "student_name": a.student.username,
+                "time": a.appointment_time.isoformat()
+            })
+            
+@api_bp.route('/appointments/<int:appointment_id>/start-session', methods=['PUT'])
+@jwt_required()
+def start_session(appointment_id):
+    appt = Appointment.query.get_or_404(appointment_id)
+    if not appt.session_started_at:
+        appt.session_started_at = datetime.datetime.utcnow()
+        db.session.commit()
+    return jsonify(msg="Session started"), 200
+
+@api_bp.route('/appointments/<int:appointment_id>/end-session', methods=['PUT'])
+@jwt_required()
+def end_session(appointment_id):
+    appt = Appointment.query.get_or_404(appointment_id)
+    appt.session_ended_at = datetime.datetime.utcnow()
+    appt.status = 'completed' # Set to completed when session ends properly
+    db.session.commit()
+    return jsonify(msg="Session ended"), 200
 
 # Add this new route in routes.py under the --- Counselor and Appointment Endpoints --- section
 

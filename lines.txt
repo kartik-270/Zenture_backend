@@ -1,0 +1,30 @@
+﻿
+    # 2. Insights Generator
+    summary_parts = []
+    if mood.lower() in ['sad', 'stressed', 'anxious']:
+        if intensity > 7:
+            summary_parts.append("You seem to be carrying a heavy load right now. Please be gentle with yourself.")
+        else:
+            summary_parts.append("It's okay to not be okay. Acknowledging your feelings is the first step.")
+    elif mood.lower() in ['excellent', 'happy', 'calm']:
+        summary_parts.append("It's wonderful that you're feeling good! Try to soak in this positive moment.")
+    
+    if sleep == 'Poor':
+        summary_parts.append("Rest is so important for mental clarity. Try to prioritize some quiet time today.")
+    
+    if not social:
+        summary_parts.append("Even a small interaction can boost your moodâ€”consider reaching out to someone later.")
+    
+    if energy == 'Low' and mood.lower() == 'stressed':
+        summary_parts.append("Your energy is low while stress is high. A short break or some deep breathing might help.")
+
+    if not summary_parts:
+        summary_parts.append("Thanks for checking in! Monitoring your journey helps in building long-term wellness.")
+
+    analysis_report = " ".join(summary_parts)
+
+    new_checkin = MoodCheckin(
+        user_id=user_id, 
+        mood=mood,
+        intensity=intensity,
+        sleep_quality=sleep,
