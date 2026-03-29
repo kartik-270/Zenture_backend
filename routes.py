@@ -2720,6 +2720,8 @@ def get_pending_feedbacks():
                 "time": a.appointment_time.isoformat()
             })
             
+    return jsonify(pending), 200
+
 @api_bp.route('/appointments/<int:appointment_id>/start-session', methods=['PUT'])
 @jwt_required()
 def start_session(appointment_id):
