@@ -1744,11 +1744,11 @@ def submit_appointment_feedback(appointment_id):
     appointment = Appointment.query.get_or_404(appointment_id)
     
     if role == 'counselor':
-        if appointment.counselor_id != user_id:
+        if appointment.counselor_id != int(user_id):
             return jsonify({"error": "Unauthorized"}), 403
         appointment.counselor_feedback = data.get('feedback')
     elif role == 'student':
-        if appointment.student_id != user_id:
+        if appointment.student_id != int(user_id):
             return jsonify({"error": "Unauthorized"}), 403
         appointment.student_emotional_state = data.get('emotional_state')
         appointment.session_helpfulness = data.get('helpfulness')
@@ -2907,7 +2907,7 @@ def set_messaging_permission(appt_id):
     user_id = get_jwt_identity()
     appointment = Appointment.query.get(appt_id)
     
-    if not appointment or appointment.student_id != user_id:
+    if not appointment or appointment.student_id != int(user_id):
         return jsonify({"msg": "Unauthorized"}), 403
         
     data = request.json
