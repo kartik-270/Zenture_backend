@@ -2734,8 +2734,11 @@ def start_session(appointment_id):
 @api_bp.route('/appointments/<int:appointment_id>/end-session', methods=['PUT'])
 @jwt_required()
 def end_session(appointment_id):
+    user_id = int(get_jwt_identity())
     appt = Appointment.query.get_or_404(appointment_id)
-    appt.session_ended_at = datetime.datetime.utcnow()
+    if appt.student_id != user_id and appt.counselor_id != user_id:
+        return jsonify(error="Unauthorized"), 403
+    appt.session_ended_at = dt.utcnow()
     appt.status = 'completed' # Set to completed when session ends properly
     db.session.commit()
     return jsonify(msg="Session ended"), 200
@@ -2846,7 +2849,7 @@ def update_appointment_status(appointment_id):
 @api_bp.route('/session/verify/<string:session_id>', methods=['GET'])
 @jwt_required()
 def verify_session_access(session_id):
-    user_id = get_jwt_identity()
+    user_id = int(get_jwt_identity())
     user = User.query.get(user_id)
     
     # Check if a valid appointment exists with this link
@@ -2968,7 +2971,7 @@ def add_client_note(student_id):
 @api_bp.route('/messages/conversations', methods=['GET'])
 @jwt_required()
 def get_conversations():
-    current_user_id = get_jwt_identity()
+    current_user_id = int(get_jwt_identity())
     
     # Get distinct users communicated with
     sent_to = db.session.query(ChatMessage.receiver_id).filter_by(sender_id=current_user_id)
@@ -3016,7 +3019,7 @@ def get_conversations():
 @api_bp.route('/messages/<int:user_id>', methods=['GET'])
 @jwt_required()
 def get_messages(user_id):
-    current_user_id = get_jwt_identity()
+    current_user_id = int(get_jwt_identity())
     
     messages = ChatMessage.query.filter(
         ((ChatMessage.sender_id == current_user_id) & (ChatMessage.receiver_id == user_id)) |
@@ -3038,9 +3041,9 @@ def get_messages(user_id):
 @api_bp.route('/messages', methods=['POST'])
 @jwt_required()
 def send_message():
-    current_user_id = get_jwt_identity()
+    current_user_id = int(get_jwt_identity())
     data = request.get_json()
-    receiver_id = data.get('receiver_id')
+    receiver_id = int(data.get('receiver_id'))
     content = data.get('content')
     
     if not receiver_id or not content:
@@ -3053,8 +3056,7 @@ def send_message():
     sender = User.query.get(current_user_id)
     notif = Notification(
         user_id=receiver_id,
-        message=f"New message from {sender.username}",
-        type="message"
+        message=f"New message from {sender.username}"
     )
     db.session.add(notif)
     
@@ -3065,7 +3067,7 @@ def send_message():
 @api_bp.route('/messages/read/<int:sender_id>', methods=['PUT'])
 @jwt_required()
 def mark_messages_read(sender_id):
-    current_user_id = get_jwt_identity()
+    current_user_id = int(get_jwt_identity())
     ChatMessage.query.filter_by(sender_id=sender_id, receiver_id=current_user_id, is_read=False)\
         .update({ChatMessage.is_read: True})
     db.session.commit()
