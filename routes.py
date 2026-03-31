@@ -264,7 +264,7 @@ def chatbot_endpoint():
         # Return as SSE stream so the frontend's stream reader can display it correctly
         crisis_follow_ups = [
             "Book a Counselor Session",
-            "Tell me more about what you're feeling",
+            "I am just feeling sad",
             "What kind of support would help right now?"
         ]
 
