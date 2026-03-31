@@ -3017,6 +3017,7 @@ def get_conversations():
     return jsonify(conversations), 200
 
 @api_bp.route('/messages/<int:user_id>', methods=['GET'])
+@api_bp.route('/messages/direct/<int:user_id>', methods=['GET'])
 @jwt_required()
 def get_messages(user_id):
     current_user_id = int(get_jwt_identity())
@@ -3039,11 +3040,12 @@ def get_messages(user_id):
     ]), 200
 
 @api_bp.route('/messages', methods=['POST'])
+@api_bp.route('/messages/direct/<int:user_id>', methods=['POST'])
 @jwt_required()
-def send_message():
+def send_message(user_id=None):
     current_user_id = int(get_jwt_identity())
     data = request.get_json()
-    receiver_id = int(data.get('receiver_id'))
+    receiver_id = user_id or (int(data.get('receiver_id')) if data.get('receiver_id') else None)
     content = data.get('content')
     
     if not receiver_id or not content:
@@ -3209,3 +3211,54 @@ def get_turn_credentials():
     except Exception as e:
         print(f"Metered TURN Error: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
+
+
+@api_bp.route('/subscription/contact', methods=['POST'])
+def subscription_contact():
+    data = request.get_json()
+    name = data.get('name')
+    email = data.get('email')
+    institution = data.get('institution')
+    phone = data.get('phone')
+    plan = data.get('plan')
+    details = data.get('details', '')
+
+    if not name or not email or not institution:
+        return jsonify(msg='Name, email, and institution are required.'), 400
+
+    subject = f'New Subscription Inquiry: {plan} - {institution}'
+    body = f'''
+New subscription request received from Zenture Wellness Platform.
+
+Name: {name}
+Email: {email}
+Institution: {institution}
+Phone: {phone}
+Selected Plan: {plan}
+
+Additional Details / Custom Requirements:
+{details}
+
+Regards,
+Zenture Automated System
+'''
+    
+    to_email = 'kartikkalra2705@gmail.com'
+    
+    success = send_with_maileroo(to_email, subject, body)
+    if not success:
+        try:
+            from flask_mail import Message
+            msg = Message(subject, recipients=[to_email])
+            msg.body = body
+            mail.send(msg)
+            success = True
+        except Exception as e:
+            print(f'Error sending subscription email: {e}')
+            success = False
+
+    if success:
+        return jsonify(msg='Inquiry sent successfully. Our team will contact you soon.'), 200
+    else:
+        return jsonify(msg='Failed to send inquiry. Please try again later.'), 500
+
